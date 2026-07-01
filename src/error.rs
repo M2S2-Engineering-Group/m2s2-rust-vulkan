@@ -30,9 +30,3 @@ impl From<ash::vk::Result> for VulkanError {
         VulkanError::VulkanError(result)
     }
 }
-
-impl From<winit::error::OsError> for VulkanError {
-    fn from(error: winit::error::OsError) -> Self {
-        VulkanError::WindowError(error.to_string())
-    }
-}

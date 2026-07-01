@@ -1,7 +1,7 @@
 use ash::{vk, Device};
 use crate::error::{Result, VulkanError};
 use crate::renderer::instance::VulkanInstance;
-use crate::window::Window;
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 pub struct VulkanDevice {
     pub physical_device: vk::PhysicalDevice,
@@ -13,34 +13,39 @@ pub struct VulkanDevice {
 }
 
 impl VulkanDevice {
-    pub fn new(instance: &VulkanInstance, window: &Window) -> Result<Self> {
+    pub fn new(
+        instance: &VulkanInstance,
+        display_handle: RawDisplayHandle,
+        window_handle: RawWindowHandle,
+    ) -> Result<Self> {
         let physical_device = Self::pick_physical_device(instance)?;
-        let queue_families = Self::find_queue_families(instance, physical_device, window)?;
+        let queue_families =
+            Self::find_queue_families(instance, physical_device, display_handle, window_handle)?;
         
         let device_extensions = vec![
-            ash::extensions::khr::Swapchain::name().as_ptr(),
+            ash::khr::swapchain::NAME.as_ptr(),
         ];
 
         let queue_priorities = [1.0];
         let mut queue_create_infos = vec![];
 
         // Graphics queue
-        let graphics_queue_create_info = vk::DeviceQueueCreateInfo::builder()
+        let graphics_queue_create_info = vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_families.graphics_family)
             .queue_priorities(&queue_priorities);
-        queue_create_infos.push(*graphics_queue_create_info);
+        queue_create_infos.push(graphics_queue_create_info);
 
         // Present queue (if different from graphics)
         if queue_families.present_family != queue_families.graphics_family {
-            let present_queue_create_info = vk::DeviceQueueCreateInfo::builder()
+            let present_queue_create_info = vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(queue_families.present_family)
                 .queue_priorities(&queue_priorities);
-            queue_create_infos.push(*present_queue_create_info);
+            queue_create_infos.push(present_queue_create_info);
         }
 
-        let device_features = vk::PhysicalDeviceFeatures::builder();
+        let device_features = vk::PhysicalDeviceFeatures::default();
 
-        let device_create_info = vk::DeviceCreateInfo::builder()
+        let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&device_extensions)
             .enabled_features(&device_features);
@@ -88,7 +93,8 @@ impl VulkanDevice {
     fn find_queue_families(
         instance: &VulkanInstance,
         physical_device: vk::PhysicalDevice,
-        window: &Window,
+        display_handle: RawDisplayHandle,
+        window_handle: RawWindowHandle,
     ) -> Result<QueueFamilyIndices> {
         let queue_families = unsafe {
             instance.instance.get_physical_device_queue_family_properties(physical_device)
@@ -98,8 +104,8 @@ impl VulkanDevice {
         let mut present_family = None;
 
         // Create a surface to check present support
-        let surface = Self::create_surface(instance, window)?;
-        let surface_loader = ash::extensions::khr::Surface::new(&instance.entry, &instance.instance);
+        let surface = Self::create_surface(instance, display_handle, window_handle)?;
+        let surface_loader = ash::khr::surface::Instance::new(&instance.entry, &instance.instance);
 
         for (index, queue_family) in queue_families.iter().enumerate() {
             let index = index as u32;
@@ -141,15 +147,17 @@ impl VulkanDevice {
         }
     }
 
-    fn create_surface(instance: &VulkanInstance, window: &Window) -> Result<vk::SurfaceKHR> {
-        use winit::raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
-
+    fn create_surface(
+        instance: &VulkanInstance,
+        display_handle: RawDisplayHandle,
+        window_handle: RawWindowHandle,
+    ) -> Result<vk::SurfaceKHR> {
         let surface = unsafe {
             ash_window::create_surface(
                 &instance.entry,
                 &instance.instance,
-                window.window.raw_display_handle().unwrap(),
-                window.window.raw_window_handle().unwrap(),
+                display_handle,
+                window_handle,
                 None,
             ).map_err(VulkanError::from)?
         };

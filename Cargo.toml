@@ -5,13 +5,12 @@ edition = "2021"
 
 [dependencies]
 # Vulkan bindings
-ash = "0.37"
-ash-window = "0.12"
-# Window management
-winit = "0.29"
-raw-window-handle = "0.5"
+ash = "0.38"
+ash-window = "0.13"
+# Surface handle types for the renderer's public API (window ownership lives with the caller)
+raw-window-handle = "0.6"
 # Math library (local)
-m2s2-math = { path = "../m2s2-rust-math/m2s2-math" }
+m2s2-math = { path = "../m2s2-rust-math" }
 # Utility for safe transmutation
 bytemuck = { version = "1.14", features = ["derive"] }
 # Logging
@@ -23,6 +22,7 @@ anyhow = "1.0"
 [dev-dependencies]
 # For examples and tests
 pollster = "0.3"
+winit = "0.29"
 
 [[example]]
 name = "triangle"

@@ -6,7 +6,7 @@ pub struct VulkanInstance {
     pub entry: Entry,
     pub instance: Instance,
     #[cfg(debug_assertions)]
-    pub debug_utils: Option<ash::extensions::ext::DebugUtils>,
+    pub debug_utils: Option<ash::ext::debug_utils::Instance>,
     #[cfg(debug_assertions)]
     pub debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
 }
@@ -16,7 +16,7 @@ impl VulkanInstance {
         let entry = unsafe { Entry::load() }
             .map_err(|e| VulkanError::InitializationError(format!("Failed to load Vulkan: {}", e)))?;
 
-        let app_info = vk::ApplicationInfo::builder()
+        let app_info = vk::ApplicationInfo::default()
             .application_name(CStr::from_bytes_with_nul(b"M2S2 Vulkan Renderer\0").unwrap())
             .application_version(vk::make_api_version(0, 1, 0, 0))
             .engine_name(CStr::from_bytes_with_nul(b"M2S2 Engine\0").unwrap())
@@ -24,27 +24,27 @@ impl VulkanInstance {
             .api_version(vk::API_VERSION_1_0);
 
         let mut extension_names = vec![
-            ash::extensions::khr::Surface::name().as_ptr(),
+            ash::khr::surface::NAME.as_ptr(),
         ];
 
         // Platform-specific surface extensions
         #[cfg(target_os = "windows")]
-        extension_names.push(ash::extensions::khr::Win32Surface::name().as_ptr());
-        
+        extension_names.push(ash::khr::win32_surface::NAME.as_ptr());
+
         #[cfg(target_os = "macos")]
-        extension_names.push(ash::extensions::ext::MetalSurface::name().as_ptr());
-        
+        extension_names.push(ash::ext::metal_surface::NAME.as_ptr());
+
         #[cfg(target_os = "linux")]
-        extension_names.push(ash::extensions::khr::XlibSurface::name().as_ptr());
+        extension_names.push(ash::khr::xlib_surface::NAME.as_ptr());
 
         let layer_names = vec![];
 
         #[cfg(debug_assertions)]
         {
-            extension_names.push(ash::extensions::ext::DebugUtils::name().as_ptr());
+            extension_names.push(ash::ext::debug_utils::NAME.as_ptr());
         }
 
-        let create_info = vk::InstanceCreateInfo::builder()
+        let create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_extension_names(&extension_names)
             .enabled_layer_names(&layer_names);
@@ -69,10 +69,10 @@ impl VulkanInstance {
     fn setup_debug_messenger(
         entry: &Entry,
         instance: &Instance,
-    ) -> Result<(ash::extensions::ext::DebugUtils, vk::DebugUtilsMessengerEXT)> {
-        let debug_utils = ash::extensions::ext::DebugUtils::new(entry, instance);
+    ) -> Result<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)> {
+        let debug_utils = ash::ext::debug_utils::Instance::new(entry, instance);
 
-        let create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
+        let create_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
             .message_severity(
                 vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
                     | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
@@ -98,7 +98,7 @@ impl VulkanInstance {
 unsafe extern "system" fn debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     message_type: vk::DebugUtilsMessageTypeFlagsEXT,
-    p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
+    p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
     _user_data: *mut std::os::raw::c_void,
 ) -> vk::Bool32 {
     let callback_data = *p_callback_data;

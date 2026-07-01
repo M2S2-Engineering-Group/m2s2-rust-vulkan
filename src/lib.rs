@@ -1,10 +1,8 @@
 pub mod renderer;
-pub mod window;
 pub mod math;
 pub mod error;
 
 pub use renderer::VulkanRenderer;
-pub use window::Window;
 pub use error::{VulkanError, Result};
 
 /// Initialize logging for the library

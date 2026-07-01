@@ -5,9 +5,8 @@ pub mod pipeline;
 pub mod buffer;
 pub mod command;
 
-use ash::vk;
 use crate::error::{Result, VulkanError};
-use crate::window::Window;
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 pub struct VulkanRenderer {
     pub instance: instance::VulkanInstance,
@@ -16,12 +15,23 @@ pub struct VulkanRenderer {
 }
 
 impl VulkanRenderer {
-    pub fn new(window: &Window) -> Result<Self> {
+    /// `window_extent` is the surface size in physical pixels, e.g. a winit window's `inner_size()`.
+    pub fn new(
+        display_handle: RawDisplayHandle,
+        window_handle: RawWindowHandle,
+        window_extent: (u32, u32),
+    ) -> Result<Self> {
         log::info!("Initializing Vulkan renderer");
-        
+
         let instance = instance::VulkanInstance::new()?;
-        let device = device::VulkanDevice::new(&instance, window)?;
-        let swapchain = swapchain::VulkanSwapchain::new(&instance, &device, window)?;
+        let device = device::VulkanDevice::new(&instance, display_handle, window_handle)?;
+        let swapchain = swapchain::VulkanSwapchain::new(
+            &instance,
+            &device,
+            display_handle,
+            window_handle,
+            window_extent,
+        )?;
 
         Ok(Self {
             instance,

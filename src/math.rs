@@ -15,14 +15,14 @@ pub fn to_radians(degrees: f32) -> f32 {
     degrees * std::f32::consts::PI / 180.0
 }
 
-/// Create a perspective projection matrix
+/// Create a perspective projection matrix (right-handed, Z in [0, 1] — Vulkan convention)
 pub fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
-    Mat4::perspective(fov_y, aspect, near, far)
+    Mat4::perspective_rh_zo(fov_y, aspect, near, far)
 }
 
-/// Create a look-at view matrix  
+/// Create a look-at view matrix (right-handed — Vulkan convention)
 pub fn look_at(eye: &Point3f, target: &Point3f, up: &Vec3) -> Mat4 {
-    Mat4::look_at(*eye, *target, *up)
+    Mat4::look_at_rh(*eye, *target, *up)
 }
 
 /// Create a translation matrix

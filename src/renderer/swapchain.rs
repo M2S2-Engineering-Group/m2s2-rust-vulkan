@@ -1,10 +1,10 @@
 use crate::error::{Result, VulkanError};
 use crate::renderer::{device::VulkanDevice, instance::VulkanInstance};
-use crate::window::Window;
-use ash::{extensions::khr::Swapchain, vk};
+use ash::{khr::swapchain, vk};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 pub struct VulkanSwapchain {
-    pub swapchain_loader: Swapchain,
+    pub swapchain_loader: swapchain::Device,
     pub swapchain: vk::SwapchainKHR,
     pub images: Vec<vk::Image>,
     pub image_views: Vec<vk::ImageView>,
@@ -13,17 +13,23 @@ pub struct VulkanSwapchain {
 }
 
 impl VulkanSwapchain {
-    pub fn new(instance: &VulkanInstance, device: &VulkanDevice, window: &Window) -> Result<Self> {
-        let surface = Self::create_surface(instance, window)?;
+    pub fn new(
+        instance: &VulkanInstance,
+        device: &VulkanDevice,
+        display_handle: RawDisplayHandle,
+        window_handle: RawWindowHandle,
+        window_extent: (u32, u32),
+    ) -> Result<Self> {
+        let surface = Self::create_surface(instance, display_handle, window_handle)?;
         let surface_loader =
-            ash::extensions::khr::Surface::new(&instance.entry, &instance.instance);
+            ash::khr::surface::Instance::new(&instance.entry, &instance.instance);
 
         let swapchain_support =
             Self::query_swapchain_support(&surface_loader, device.physical_device, surface)?;
 
         let surface_format = Self::choose_swap_surface_format(&swapchain_support.formats);
         let present_mode = Self::choose_swap_present_mode(&swapchain_support.present_modes);
-        let extent = Self::choose_swap_extent(&swapchain_support.capabilities, window);
+        let extent = Self::choose_swap_extent(&swapchain_support.capabilities, window_extent);
 
         let mut image_count = swapchain_support.capabilities.min_image_count + 1;
         if swapchain_support.capabilities.max_image_count > 0
@@ -32,7 +38,7 @@ impl VulkanSwapchain {
             image_count = swapchain_support.capabilities.max_image_count;
         }
 
-        let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
+        let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
             .min_image_count(image_count)
             .image_format(surface_format.format)
@@ -46,7 +52,7 @@ impl VulkanSwapchain {
             .present_mode(present_mode)
             .clipped(true);
 
-        let swapchain_loader = Swapchain::new(&instance.instance, &device.device);
+        let swapchain_loader = swapchain::Device::new(&instance.instance, &device.device);
         let swapchain = unsafe {
             swapchain_loader
                 .create_swapchain(&swapchain_create_info, None)
@@ -76,15 +82,17 @@ impl VulkanSwapchain {
         })
     }
 
-    fn create_surface(instance: &VulkanInstance, window: &Window) -> Result<vk::SurfaceKHR> {
-        use winit::raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
-
+    fn create_surface(
+        instance: &VulkanInstance,
+        display_handle: RawDisplayHandle,
+        window_handle: RawWindowHandle,
+    ) -> Result<vk::SurfaceKHR> {
         let surface = unsafe {
             ash_window::create_surface(
                 &instance.entry,
                 &instance.instance,
-                window.window.raw_display_handle().unwrap(),
-                window.window.raw_window_handle().unwrap(),
+                display_handle,
+                window_handle,
                 None,
             )
             .map_err(VulkanError::from)?
@@ -94,7 +102,7 @@ impl VulkanSwapchain {
     }
 
     fn query_swapchain_support(
-        surface_loader: &ash::extensions::khr::Surface,
+        surface_loader: &ash::khr::surface::Instance,
         physical_device: vk::PhysicalDevice,
         surface: vk::SurfaceKHR,
     ) -> Result<SwapchainSupportDetails> {
@@ -149,18 +157,18 @@ impl VulkanSwapchain {
 
     fn choose_swap_extent(
         capabilities: &vk::SurfaceCapabilitiesKHR,
-        window: &Window,
+        window_extent: (u32, u32),
     ) -> vk::Extent2D {
         if capabilities.current_extent.width != u32::MAX {
             capabilities.current_extent
         } else {
-            let size = window.inner_size();
+            let (width, height) = window_extent;
             vk::Extent2D {
-                width: size.width.clamp(
+                width: width.clamp(
                     capabilities.min_image_extent.width,
                     capabilities.max_image_extent.width,
                 ),
-                height: size.height.clamp(
+                height: height.clamp(
                     capabilities.min_image_extent.height,
                     capabilities.max_image_extent.height,
                 ),
@@ -176,7 +184,7 @@ impl VulkanSwapchain {
         let mut image_views = Vec::with_capacity(images.len());
 
         for &image in images {
-            let create_info = vk::ImageViewCreateInfo::builder()
+            let create_info = vk::ImageViewCreateInfo::default()
                 .image(image)
                 .view_type(vk::ImageViewType::TYPE_2D)
                 .format(format)
