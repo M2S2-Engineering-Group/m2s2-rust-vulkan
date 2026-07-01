@@ -1,9 +1,9 @@
-pub mod renderer;
-pub mod math;
 pub mod error;
+pub mod math;
+pub mod renderer;
 
+pub use error::{Result, VulkanError};
 pub use renderer::VulkanRenderer;
-pub use error::{VulkanError, Result};
 
 /// Initialize logging for the library
 pub fn init_logging() {
@@ -12,8 +12,6 @@ pub fn init_logging() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn it_works() {
         let result = 2 + 2;

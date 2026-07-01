@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 event: WindowEvent::Resized(physical_size),
                 ..
             } => {
-                log::info!("Window resized to: {:?}", physical_size);
+                log::info!("Window resized to: {physical_size:?}");
             }
             _ => {}
         }

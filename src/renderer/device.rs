@@ -1,6 +1,6 @@
-use ash::{vk, Device};
 use crate::error::{Result, VulkanError};
 use crate::renderer::instance::VulkanInstance;
+use ash::{vk, Device};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 pub struct VulkanDevice {
@@ -21,10 +21,8 @@ impl VulkanDevice {
         let physical_device = Self::pick_physical_device(instance)?;
         let queue_families =
             Self::find_queue_families(instance, physical_device, display_handle, window_handle)?;
-        
-        let device_extensions = vec![
-            ash::khr::swapchain::NAME.as_ptr(),
-        ];
+
+        let device_extensions = vec![ash::khr::swapchain::NAME.as_ptr()];
 
         let queue_priorities = [1.0];
         let mut queue_create_infos = vec![];
@@ -51,17 +49,15 @@ impl VulkanDevice {
             .enabled_features(&device_features);
 
         let device = unsafe {
-            instance.instance.create_device(physical_device, &device_create_info, None)
+            instance
+                .instance
+                .create_device(physical_device, &device_create_info, None)
                 .map_err(VulkanError::from)?
         };
 
-        let graphics_queue = unsafe {
-            device.get_device_queue(queue_families.graphics_family, 0)
-        };
+        let graphics_queue = unsafe { device.get_device_queue(queue_families.graphics_family, 0) };
 
-        let present_queue = unsafe {
-            device.get_device_queue(queue_families.present_family, 0)
-        };
+        let present_queue = unsafe { device.get_device_queue(queue_families.present_family, 0) };
 
         Ok(Self {
             physical_device,
@@ -75,13 +71,15 @@ impl VulkanDevice {
 
     fn pick_physical_device(instance: &VulkanInstance) -> Result<vk::PhysicalDevice> {
         let physical_devices = unsafe {
-            instance.instance.enumerate_physical_devices()
+            instance
+                .instance
+                .enumerate_physical_devices()
                 .map_err(VulkanError::from)?
         };
 
         if physical_devices.is_empty() {
             return Err(VulkanError::InitializationError(
-                "No Vulkan-compatible devices found".to_string()
+                "No Vulkan-compatible devices found".to_string(),
             ));
         }
 
@@ -97,7 +95,9 @@ impl VulkanDevice {
         window_handle: RawWindowHandle,
     ) -> Result<QueueFamilyIndices> {
         let queue_families = unsafe {
-            instance.instance.get_physical_device_queue_family_properties(physical_device)
+            instance
+                .instance
+                .get_physical_device_queue_family_properties(physical_device)
         };
 
         let mut graphics_family = None;
@@ -115,11 +115,9 @@ impl VulkanDevice {
             }
 
             let present_support = unsafe {
-                surface_loader.get_physical_device_surface_support(
-                    physical_device,
-                    index,
-                    surface,
-                ).map_err(VulkanError::from)?
+                surface_loader
+                    .get_physical_device_surface_support(physical_device, index, surface)
+                    .map_err(VulkanError::from)?
             };
 
             if present_support {
@@ -142,7 +140,7 @@ impl VulkanDevice {
                 present_family: present,
             }),
             _ => Err(VulkanError::InitializationError(
-                "Could not find suitable queue families".to_string()
+                "Could not find suitable queue families".to_string(),
             )),
         }
     }
@@ -159,7 +157,8 @@ impl VulkanDevice {
                 display_handle,
                 window_handle,
                 None,
-            ).map_err(VulkanError::from)?
+            )
+            .map_err(VulkanError::from)?
         };
 
         Ok(surface)

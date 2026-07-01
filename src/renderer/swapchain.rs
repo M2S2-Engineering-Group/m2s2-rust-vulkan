@@ -21,8 +21,7 @@ impl VulkanSwapchain {
         window_extent: (u32, u32),
     ) -> Result<Self> {
         let surface = Self::create_surface(instance, display_handle, window_handle)?;
-        let surface_loader =
-            ash::khr::surface::Instance::new(&instance.entry, &instance.instance);
+        let surface_loader = ash::khr::surface::Instance::new(&instance.entry, &instance.instance);
 
         let swapchain_support =
             Self::query_swapchain_support(&surface_loader, device.physical_device, surface)?;

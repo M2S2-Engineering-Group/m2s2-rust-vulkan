@@ -14,11 +14,11 @@ pub enum VulkanError {
 impl fmt::Display for VulkanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            VulkanError::VulkanError(result) => write!(f, "Vulkan error: {:?}", result),
-            VulkanError::WindowError(msg) => write!(f, "Window error: {}", msg),
-            VulkanError::InitializationError(msg) => write!(f, "Initialization error: {}", msg),
-            VulkanError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
-            VulkanError::Other(msg) => write!(f, "Error: {}", msg),
+            VulkanError::VulkanError(result) => write!(f, "Vulkan error: {result:?}"),
+            VulkanError::WindowError(msg) => write!(f, "Window error: {msg}"),
+            VulkanError::InitializationError(msg) => write!(f, "Initialization error: {msg}"),
+            VulkanError::ValidationError(msg) => write!(f, "Validation error: {msg}"),
+            VulkanError::Other(msg) => write!(f, "Error: {msg}"),
         }
     }
 }

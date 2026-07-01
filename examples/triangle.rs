@@ -38,12 +38,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 event: WindowEvent::Resized(physical_size),
                 ..
             } => {
-                log::info!("Window resized to: {:?}", physical_size);
+                log::info!("Window resized to: {physical_size:?}");
                 // TODO: Handle swapchain recreation
             }
             Event::AboutToWait => {
                 if let Err(e) = renderer.render_frame() {
-                    log::error!("Render error: {}", e);
+                    log::error!("Render error: {e}");
                 }
             }
             _ => {}

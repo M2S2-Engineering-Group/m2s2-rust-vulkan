@@ -1,8 +1,7 @@
 // Placeholder for command buffer management
 // This will contain command pool and command buffer creation/recording
 
-use ash::vk;
-use crate::error::{Result, VulkanError};
+use crate::error::Result;
 
 pub struct CommandBuffer {
     // TODO: Implement command buffer management

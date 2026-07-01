@@ -9,8 +9,7 @@ reusable rendering backend for two separate consumers: a Vulkan tutorial project
 college project. Because of that, the library is intentionally scoped to Vulkan mechanics only — it does not
 own window creation or the event loop; callers bring their own (see Architecture below).
 
-It depends on a sibling crate, `m2s2-math` (linear algebra: vectors, matrices, quaternions), via a local path
-dependency — not from crates.io.
+It depends on `m2s2-math` (linear algebra: vectors, matrices, quaternions), published on crates.io.
 
 ## Commands
 
@@ -20,17 +19,44 @@ cargo build --examples   # build the examples (catches drift between lib API and
 cargo run --example window    # winit window only, no Vulkan — sanity-checks the windowing setup
 cargo run --example triangle  # Vulkan instance/device/swapchain init + render loop stub
 cargo test                # unit tests (currently minimal — see Status)
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-There is no CI, clippy config, rustfmt config, or rust-toolchain pin in this repo. `cargo build`,
-`cargo build --examples`, and `cargo test` all passing is the bar for a change being done.
+## Quality gates
 
-### Sibling dependency
+`cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo build
+--all-targets`, and `cargo test --all-targets` must all pass clean (zero warnings) — this is enforced both
+locally and in CI:
 
-`Cargo.toml` points `m2s2-math` at `../m2s2-rust-math` (relative to this repo, not nested inside it). This repo
-cannot build standalone without that sibling checked out at that path. When `m2s2-math`'s public API changes
-(e.g. a method rename), `src/math.rs` in this crate needs a matching update — this has already caused a build
-break once (see Status).
+- **Pre-commit hook**: `.githooks/pre-commit` runs all four. Enable it once per clone with
+  `git config core.hooksPath .githooks`. It is not enabled by default — a fresh clone has no active hook until
+  you run that command.
+- **CI**: `.github/workflows/ci.yml` runs the same four checks on every push/PR to `main`, on `ubuntu-latest`.
+  There's no GPU or Vulkan SDK on the runner — this is fine because `ash`'s default `loaded` feature dynamically
+  loads the Vulkan library at runtime (via `libloading`), so building and running the (non-Vulkan-calling) unit
+  tests doesn't require Vulkan to actually be present. Don't add a test that calls `Entry::load()` or otherwise
+  touches a real Vulkan driver without first giving CI a software implementation (e.g. lavapipe) or gating it
+  behind a feature/env check.
+
+There's no rust-toolchain pin — CI and local dev both use whatever stable toolchain is installed.
+
+### Dependency on `m2s2-math`
+
+`Cargo.toml` depends on the published `m2s2-math = "0.2"` from crates.io — CI and `cargo publish` both resolve
+it from there, so CI is testing exactly what a downstream consumer would get. When `m2s2-math`'s public API
+changes (e.g. a method rename), `src/math.rs` in this crate needs a matching update after bumping the version
+requirement — this has already caused a silent build break once (see Status).
+
+For live cross-repo development against an unpublished sibling checkout, create an untracked
+`.cargo/config.toml` (gitignored, not committed — CI must not see it) with:
+
+```toml
+paths = ["../m2s2-rust-math"]
+```
+
+This overrides `m2s2-math` to resolve from the local sibling path instead of crates.io, as long as the sibling
+repo exists at `../m2s2-rust-math` relative to this one.
 
 ## Architecture
 
@@ -74,6 +100,9 @@ D3D conventions (`_rh_no`, `_lh_zo`, etc.) that this layer does not surface.
   winit 0.29's actual event-loop API (2-arg closure, `Event::AboutToWait`, `elwt.exit()` — the examples had
   been written against an older winit API and `cargo build --examples` was silently broken before any of
   this).
+- Switched `m2s2-math` from a local path dependency to the published crates.io version, added a pre-commit
+  hook and a GitHub Actions CI workflow (fmt + clippy + build + test), and fixed the codebase to actually pass
+  those gates (formatting, unused imports, inlined format args, C-string literals) — see Quality gates.
 
 ### Not yet done
 Tracked informally in `README.md`'s "Next Steps" and `LEARNING_PATH.md`; the stub files under `src/renderer/`

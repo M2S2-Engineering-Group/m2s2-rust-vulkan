@@ -1,9 +1,10 @@
 pub use m2s2_math::{
-    Matrix4x4f32 as Mat4, 
-    Vector2f32 as Vec2, 
-    Vector3f32 as Vec3, 
+    Matrix4x4f32 as Mat4,
+    Transform4x4,
+    Vector2f32 as Vec2,
+    Vector3Ops, // Import the traits
+    Vector3f32 as Vec3,
     Vector4f32 as Vec4,
-    Transform4x4, Vector3Ops, // Import the traits
 };
 
 // Type aliases for convenience

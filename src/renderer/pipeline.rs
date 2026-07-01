@@ -1,8 +1,7 @@
 // Placeholder for graphics pipeline implementation
 // This will contain render pass, pipeline layout, and graphics pipeline creation
 
-use ash::vk;
-use crate::error::{Result, VulkanError};
+use crate::error::Result;
 
 pub struct GraphicsPipeline {
     // TODO: Implement graphics pipeline

@@ -9,8 +9,8 @@ ash = "0.38"
 ash-window = "0.13"
 # Surface handle types for the renderer's public API (window ownership lives with the caller)
 raw-window-handle = "0.6"
-# Math library (local)
-m2s2-math = { path = "../m2s2-rust-math" }
+# Math library (published to crates.io; override locally with .cargo/config.toml for cross-repo dev)
+m2s2-math = "0.2"
 # Utility for safe transmutation
 bytemuck = { version = "1.14", features = ["derive"] }
 # Logging

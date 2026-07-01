@@ -1,9 +1,9 @@
-pub mod instance;
-pub mod device;
-pub mod swapchain;
-pub mod pipeline;
 pub mod buffer;
 pub mod command;
+pub mod device;
+pub mod instance;
+pub mod pipeline;
+pub mod swapchain;
 
 use crate::error::{Result, VulkanError};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
@@ -48,7 +48,9 @@ impl VulkanRenderer {
 
     pub fn wait_idle(&self) -> Result<()> {
         unsafe {
-            self.device.device.device_wait_idle()
+            self.device
+                .device
+                .device_wait_idle()
                 .map_err(VulkanError::from)?;
         }
         Ok(())
