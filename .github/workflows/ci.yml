@@ -32,3 +32,22 @@ jobs:
 
       - name: cargo test
         run: cargo test --all-targets
+
+  commit-lint:
+    name: conventional commits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commit messages
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            range="${{ github.event.before }}..${{ github.event.after }}"
+          else
+            range="HEAD~1..HEAD"
+          fi
+          git log --format=%s "$range" | ./scripts/check-commit-msg.sh

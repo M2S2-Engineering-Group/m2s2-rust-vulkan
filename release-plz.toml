@@ -1,0 +1,8 @@
+[workspace]
+changelog_update = true
+git_release_enable = true
+git_tag_enable = true
+# Not publishing to crates.io yet — the renderer is still mostly stubs.
+# Flip this on once there's real functionality worth shipping publicly,
+# and add a CARGO_REGISTRY_TOKEN secret + license/description metadata in Cargo.toml.
+publish = false

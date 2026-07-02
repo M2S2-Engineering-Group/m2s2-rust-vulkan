@@ -41,6 +41,25 @@ locally and in CI:
 
 There's no rust-toolchain pin — CI and local dev both use whatever stable toolchain is installed.
 
+### Commit message format (required for releases)
+
+Commit subjects must follow [Conventional Commits](https://www.conventionalcommits.org):
+`<feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert>(<scope>)?!?: <description>`. This is enforced
+by `.githooks/commit-msg` (same `core.hooksPath` setup as above) and by the `commit-lint` job in
+`ci.yml` — both call the shared `scripts/check-commit-msg.sh`. This isn't just style: release-plz (below)
+determines the next version bump by parsing these prefixes, so an unconventional commit message silently
+produces no release rather than a failed build.
+
+### Releases (release-plz)
+
+`.github/workflows/release-plz.yml` runs [release-plz](https://release-plz.dev/) on every push to `main`:
+it opens/updates a "Release-plz" PR that bumps `Cargo.toml`'s version and writes `CHANGELOG.md` from the
+Conventional Commits merged since the last release. Merging that PR triggers the second job, which cuts a
+git tag and a GitHub Release. `release-plz.toml` sets `publish = false` — crates.io publishing is
+deliberately not wired up yet (see Status); no `CARGO_REGISTRY_TOKEN` secret exists. When the engine has
+real functionality worth shipping, flip `publish = true`, fill in the crates.io-required Cargo.toml metadata
+(`license`, `description`, `repository`), and add that secret.
+
 ### Dependency on `m2s2-math`
 
 `Cargo.toml` depends on the published `m2s2-math = "0.2"` from crates.io — CI and `cargo publish` both resolve
@@ -103,6 +122,8 @@ D3D conventions (`_rh_no`, `_lh_zo`, etc.) that this layer does not surface.
 - Switched `m2s2-math` from a local path dependency to the published crates.io version, added a pre-commit
   hook and a GitHub Actions CI workflow (fmt + clippy + build + test), and fixed the codebase to actually pass
   those gates (formatting, unused imports, inlined format args, C-string literals) — see Quality gates.
+- Added Conventional Commit enforcement (hook + CI) and release-plz for automated versioning, changelog, and
+  git tags/GitHub Releases on merge to `main` — crates.io publishing intentionally left off for now.
 
 ### Not yet done
 Tracked informally in `README.md`'s "Next Steps" and `LEARNING_PATH.md`; the stub files under `src/renderer/`

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Enable with: git config core.hooksPath .githooks
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+subject="$(head -n1 "$1")"
+
+if ! echo "$subject" | "$repo_root/scripts/check-commit-msg.sh"; then
+  echo "commit-msg: rejecting commit (see https://www.conventionalcommits.org)" >&2
+  exit 1
+fi
