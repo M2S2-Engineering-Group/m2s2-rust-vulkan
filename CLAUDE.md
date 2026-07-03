@@ -68,8 +68,8 @@ as a side benefit, PRs/pushes made with an App token (unlike the default `GITHUB
 downstream workflows, so `ci.yml` runs on the release-plz PR instead of silently not firing.
 
 Both jobs in `release-plz.yml` call `actions/create-github-app-token@v1` to mint a short-lived token from:
-- `secrets.RELEASE_PLZ_APP_ID` — the App's numeric ID
-- `secrets.RELEASE_PLZ_APP_PRIVATE_KEY` — the App's PEM private key
+- `secrets.APP_ID` — the App's numeric ID
+- `secrets.APP_PRIVATE_KEY` — the App's PEM private key
 
 The App must be installed on this repo with `contents: write` and `pull-requests: write` permissions.
 

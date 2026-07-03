@@ -19,8 +19,8 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
-          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
-          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -50,8 +50,8 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
-          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
-          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
       - name: Checkout repository
         uses: actions/checkout@v4
