@@ -60,6 +60,19 @@ deliberately not wired up yet (see Status); no `CARGO_REGISTRY_TOKEN` secret exi
 real functionality worth shipping, flip `publish = true`, fill in the crates.io-required Cargo.toml metadata
 (`license`, `description`, `repository`), and add that secret.
 
+**Auth uses a GitHub App, not the default `GITHUB_TOKEN`.** The org has "Allow GitHub Actions to create and
+approve pull requests" disabled, so the default token gets a 403 (`GitHub Actions is not permitted to create
+or approve pull requests`) when release-plz tries to open the release PR — this restriction applies
+regardless of the workflow's `permissions:` block. A GitHub App installation token isn't subject to it, and
+as a side benefit, PRs/pushes made with an App token (unlike the default `GITHUB_TOKEN`) actually trigger
+downstream workflows, so `ci.yml` runs on the release-plz PR instead of silently not firing.
+
+Both jobs in `release-plz.yml` call `actions/create-github-app-token@v1` to mint a short-lived token from:
+- `secrets.RELEASE_PLZ_APP_ID` — the App's numeric ID
+- `secrets.RELEASE_PLZ_APP_PRIVATE_KEY` — the App's PEM private key
+
+The App must be installed on this repo with `contents: write` and `pull-requests: write` permissions.
+
 ### Dependency on `m2s2-math`
 
 `Cargo.toml` depends on the published `m2s2-math = "0.2"` from crates.io — CI and `cargo publish` both resolve
