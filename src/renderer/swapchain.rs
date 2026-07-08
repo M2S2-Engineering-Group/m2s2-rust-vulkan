@@ -10,6 +10,8 @@ pub struct VulkanSwapchain {
     pub image_views: Vec<vk::ImageView>,
     pub format: vk::Format,
     pub extent: vk::Extent2D,
+    surface_loader: ash::khr::surface::Instance,
+    surface: vk::SurfaceKHR,
 }
 
 impl VulkanSwapchain {
@@ -20,7 +22,7 @@ impl VulkanSwapchain {
         window_handle: RawWindowHandle,
         window_extent: (u32, u32),
     ) -> Result<Self> {
-        let surface = Self::create_surface(instance, display_handle, window_handle)?;
+        let surface = instance.create_surface(display_handle, window_handle)?;
         let surface_loader = ash::khr::surface::Instance::new(&instance.entry, &instance.instance);
 
         let swapchain_support =
@@ -66,11 +68,6 @@ impl VulkanSwapchain {
 
         let image_views = Self::create_image_views(&device.device, &images, surface_format.format)?;
 
-        // Clean up surface
-        unsafe {
-            surface_loader.destroy_surface(surface, None);
-        }
-
         Ok(Self {
             swapchain_loader,
             swapchain,
@@ -78,26 +75,9 @@ impl VulkanSwapchain {
             image_views,
             format: surface_format.format,
             extent,
+            surface_loader,
+            surface,
         })
-    }
-
-    fn create_surface(
-        instance: &VulkanInstance,
-        display_handle: RawDisplayHandle,
-        window_handle: RawWindowHandle,
-    ) -> Result<vk::SurfaceKHR> {
-        let surface = unsafe {
-            ash_window::create_surface(
-                &instance.entry,
-                &instance.instance,
-                display_handle,
-                window_handle,
-                None,
-            )
-            .map_err(VulkanError::from)?
-        };
-
-        Ok(surface)
     }
 
     fn query_swapchain_support(
@@ -225,8 +205,120 @@ impl Drop for VulkanSwapchain {
         // Note: image_views need to be destroyed by the device that owns them
         // This will be handled by the renderer cleanup
         unsafe {
+            // The swapchain must be destroyed before the surface it was created from
+            // (VUID-vkDestroySurfaceKHR-surface-01266).
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
+            self.surface_loader.destroy_surface(self.surface, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn format(format: vk::Format, color_space: vk::ColorSpaceKHR) -> vk::SurfaceFormatKHR {
+        vk::SurfaceFormatKHR {
+            format,
+            color_space,
+        }
+    }
+
+    #[test]
+    fn prefers_srgb_when_available() {
+        let formats = [
+            format(
+                vk::Format::R8G8B8A8_UNORM,
+                vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            ),
+            format(vk::Format::B8G8R8A8_SRGB, vk::ColorSpaceKHR::SRGB_NONLINEAR),
+        ];
+        let chosen = VulkanSwapchain::choose_swap_surface_format(&formats);
+        assert_eq!(chosen.format, vk::Format::B8G8R8A8_SRGB);
+        assert_eq!(chosen.color_space, vk::ColorSpaceKHR::SRGB_NONLINEAR);
+    }
+
+    #[test]
+    fn falls_back_to_first_format_when_srgb_unavailable() {
+        let formats = [format(
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        )];
+        let chosen = VulkanSwapchain::choose_swap_surface_format(&formats);
+        assert_eq!(chosen.format, vk::Format::R8G8B8A8_UNORM);
+    }
+
+    #[test]
+    fn prefers_mailbox_present_mode_when_available() {
+        let modes = [vk::PresentModeKHR::FIFO, vk::PresentModeKHR::MAILBOX];
+        assert_eq!(
+            VulkanSwapchain::choose_swap_present_mode(&modes),
+            vk::PresentModeKHR::MAILBOX
+        );
+    }
+
+    #[test]
+    fn falls_back_to_fifo_present_mode() {
+        let modes = [vk::PresentModeKHR::IMMEDIATE];
+        assert_eq!(
+            VulkanSwapchain::choose_swap_present_mode(&modes),
+            vk::PresentModeKHR::FIFO
+        );
+    }
+
+    fn capabilities(
+        current_extent: vk::Extent2D,
+        min_extent: vk::Extent2D,
+        max_extent: vk::Extent2D,
+    ) -> vk::SurfaceCapabilitiesKHR {
+        vk::SurfaceCapabilitiesKHR {
+            current_extent,
+            min_image_extent: min_extent,
+            max_image_extent: max_extent,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn uses_current_extent_when_fixed_by_surface() {
+        let caps = capabilities(
+            vk::Extent2D {
+                width: 640,
+                height: 480,
+            },
+            vk::Extent2D {
+                width: 1,
+                height: 1,
+            },
+            vk::Extent2D {
+                width: 4096,
+                height: 4096,
+            },
+        );
+        let extent = VulkanSwapchain::choose_swap_extent(&caps, (1920, 1080));
+        assert_eq!(extent.width, 640);
+        assert_eq!(extent.height, 480);
+    }
+
+    #[test]
+    fn clamps_window_extent_when_surface_extent_is_variable() {
+        let caps = capabilities(
+            vk::Extent2D {
+                width: u32::MAX,
+                height: u32::MAX,
+            },
+            vk::Extent2D {
+                width: 100,
+                height: 100,
+            },
+            vk::Extent2D {
+                width: 800,
+                height: 600,
+            },
+        );
+        let extent = VulkanSwapchain::choose_swap_extent(&caps, (50, 2000));
+        assert_eq!(extent.width, 100);
+        assert_eq!(extent.height, 600);
     }
 }

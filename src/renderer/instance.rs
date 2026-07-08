@@ -1,5 +1,6 @@
 use crate::error::{Result, VulkanError};
 use ash::{vk, Entry, Instance};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::ffi::CStr;
 
 pub struct VulkanInstance {
@@ -35,6 +36,9 @@ impl VulkanInstance {
         #[cfg(target_os = "linux")]
         extension_names.push(ash::khr::xlib_surface::NAME.as_ptr());
 
+        #[cfg(target_os = "linux")]
+        extension_names.push(ash::khr::wayland_surface::NAME.as_ptr());
+
         let layer_names = vec![];
 
         #[cfg(debug_assertions)]
@@ -61,6 +65,25 @@ impl VulkanInstance {
             #[cfg(debug_assertions)]
             debug_messenger: Some(debug_messenger),
         })
+    }
+
+    /// Creates a `vk::SurfaceKHR` for the given window. Callers must destroy it (via the
+    /// `VK_KHR_surface` instance functions) no earlier than any swapchain built from it.
+    pub fn create_surface(
+        &self,
+        display_handle: RawDisplayHandle,
+        window_handle: RawWindowHandle,
+    ) -> Result<vk::SurfaceKHR> {
+        unsafe {
+            ash_window::create_surface(
+                &self.entry,
+                &self.instance,
+                display_handle,
+                window_handle,
+                None,
+            )
+        }
+        .map_err(VulkanError::from)
     }
 
     #[cfg(debug_assertions)]

@@ -30,3 +30,29 @@ impl From<ash::vk::Result> for VulkanError {
         VulkanError::VulkanError(result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_includes_variant_message() {
+        assert_eq!(
+            VulkanError::WindowError("bad handle".into()).to_string(),
+            "Window error: bad handle"
+        );
+        assert_eq!(
+            VulkanError::InitializationError("no gpu".into()).to_string(),
+            "Initialization error: no gpu"
+        );
+    }
+
+    #[test]
+    fn from_ash_result_wraps_vulkan_error_variant() {
+        let err: VulkanError = ash::vk::Result::ERROR_DEVICE_LOST.into();
+        assert!(matches!(
+            err,
+            VulkanError::VulkanError(ash::vk::Result::ERROR_DEVICE_LOST)
+        ));
+    }
+}

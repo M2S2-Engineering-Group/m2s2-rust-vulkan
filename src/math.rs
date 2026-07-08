@@ -35,3 +35,15 @@ pub fn translate(translation: &Vec3) -> Mat4 {
 pub fn rotate(axis: &Vec3, angle: f32) -> Mat4 {
     Mat4::rotation_axis_angle(*axis, angle)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_radians_converts_known_angles() {
+        assert!((to_radians(180.0) - std::f32::consts::PI).abs() < 1e-6);
+        assert!((to_radians(90.0) - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        assert_eq!(to_radians(0.0), 0.0);
+    }
+}

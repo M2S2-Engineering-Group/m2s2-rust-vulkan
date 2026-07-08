@@ -88,17 +88,37 @@ paths = ["../m2s2-rust-math"]
 ```
 
 This overrides `m2s2-math` to resolve from the local sibling path instead of crates.io, as long as the sibling
-repo exists at `../m2s2-rust-math` relative to this one.
+repo exists at `../m2s2-rust-math` relative to this one. Caveat: cargo warns (currently non-fatal, planned to
+become a hard error) if the sibling's own dependency set has drifted from what's published — check `cargo
+build` output if this override starts misbehaving.
+
+### Vulkan binding choice: `ash`, not `vulkanalia`
+
+Evaluated switching to `vulkanalia` (the binding built for the Rust port of vulkan-tutorial.com) since one of
+the two intended consumers is following that tutorial. Decided to stay on `ash`: it has a much larger
+ecosystem of complementary crates (`gpu-allocator` for the buffer/memory work still to come, `ash-window`,
+and it's what `wgpu`'s Vulkan backend uses), and a broader maintainer base than vulkanalia's effectively
+single-maintainer project. vulkanalia's extension-trait ergonomics (no manually-constructed loader structs)
+are nicer, but not enough to justify redoing `instance.rs`/`device.rs`/`swapchain.rs` again right after the
+0.38 migration.
 
 ## Architecture
 
 `src/renderer/` is a thin layering of Vulkan objects, each wrapping the next:
 
 - **`instance.rs`** — `VulkanInstance`: `Entry` + `ash::Instance`, plus a validation/debug messenger under
-  `cfg(debug_assertions)` only (release builds skip it).
-- **`device.rs`** — `VulkanDevice`: picks a physical device (currently just `physical_devices[0]`, no
-  suitability scoring), resolves graphics/present queue families, creates the logical device + queues.
-- **`swapchain.rs`** — `VulkanSwapchain`: surface, swapchain, and image views.
+  `cfg(debug_assertions)` only (release builds skip it). Owns the one `create_surface` implementation
+  (`ash_window::create_surface`) — `device.rs` and `swapchain.rs` both call `instance.create_surface(...)`
+  rather than each having their own copy.
+- **`device.rs`** — `VulkanDevice`: enumerates all physical devices and scores them (`score_device_type`:
+  discrete > integrated > virtual > CPU), skipping any that lack a graphics+present queue, the
+  `VK_KHR_swapchain` extension, or a non-empty format/present-mode list for the surface. Creates a transient
+  surface purely to run that check, then destroys it — the swapchain's real surface is separate and
+  longer-lived (see below).
+- **`swapchain.rs`** — `VulkanSwapchain`: surface, swapchain, and image views. Owns its surface for its full
+  lifetime (`surface`/`surface_loader` fields) and destroys the swapchain before the surface in `Drop` —
+  destroying them in the other order is a Vulkan spec violation (`VUID-vkDestroySurfaceKHR-surface-01266`)
+  that the original code hit (the surface was destroyed right after creating the swapchain from it).
 - **`pipeline.rs`, `buffer.rs`, `command.rs`** — stub placeholders (`TODO`), not yet implemented.
 - **`mod.rs`** — `VulkanRenderer` composes instance → device → swapchain. `render_frame()` is currently a
   no-op stub; `Drop` calls `wait_idle()`.
@@ -109,10 +129,6 @@ dependency) plus an explicit `(u32, u32)` surface extent — not a `Window` type
 only, used by the examples to obtain those handles. This split is deliberate: window/event-loop ownership
 stays with whichever application embeds the renderer, so the two intended consumers (which may already have
 their own main loops) aren't forced into this crate's choices.
-
-One known wart: `device.rs` and `swapchain.rs` each independently create and destroy their own throwaway
-surface (device.rs needs one transiently to query present support; swapchain.rs creates its own real one).
-This works but duplicates surface-creation logic — not yet consolidated.
 
 `src/math.rs` is a thin convenience layer over `m2s2-math`: type aliases (`Mat4`, `Vec2/3/4`, `Point2f/3f`)
 and free functions (`perspective`, `look_at`, `translate`, `rotate`) that call `m2s2-math`'s
@@ -137,6 +153,11 @@ D3D conventions (`_rh_no`, `_lh_zo`, etc.) that this layer does not surface.
   those gates (formatting, unused imports, inlined format args, C-string literals) — see Quality gates.
 - Added Conventional Commit enforcement (hook + CI) and release-plz for automated versioning, changelog, and
   git tags/GitHub Releases on merge to `main` — crates.io publishing intentionally left off for now.
+- Added real physical device suitability scoring (`device.rs`), consolidated surface creation into
+  `VulkanInstance::create_surface` (was duplicated in `device.rs` and `swapchain.rs`), fixed the
+  destroy-order bug that violated `VUID-vkDestroySurfaceKHR-surface-01266`, added Wayland alongside Xlib as
+  a Linux surface extension, removed the stale `MATH_TODO.md`, and added unit tests for the pure logic in
+  `device.rs`/`swapchain.rs`/`error.rs`/`math.rs` (13 tests total, up from 1).
 
 ### Not yet done
 Tracked informally in `README.md`'s "Next Steps" and `LEARNING_PATH.md`; the stub files under `src/renderer/`
@@ -147,9 +168,4 @@ are the concrete markers:
 - An actual render loop — `render_frame()` is a no-op; acquiring an image, recording/submitting a command
   buffer, and presenting are all unimplemented
 - Swapchain recreation on window resize (the `triangle.rs` resize handler is a `TODO`)
-- Physical device suitability scoring (currently always picks device 0)
 - Shader loading/SPIR-V compilation
-- `MATH_TODO.md` is stale — it lists math functions as not-yet-implemented that already exist in `m2s2-math`
-  under different (convention-suffixed) names; it should be reconciled or removed rather than trusted as-is.
-- Linux surface creation is hardcoded to Xlib (`ash::khr::xlib_surface`) — no Wayland path, so this won't work
-  under a Wayland session.
