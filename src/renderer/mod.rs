@@ -7,11 +7,17 @@ pub mod swapchain;
 
 use crate::error::{Result, VulkanError};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+use std::mem::ManuallyDrop;
 
 pub struct VulkanRenderer {
-    pub instance: instance::VulkanInstance,
-    pub device: device::VulkanDevice,
-    pub swapchain: swapchain::VulkanSwapchain,
+    // `ManuallyDrop` and torn down explicitly in `Drop`, in swapchain -> device -> instance
+    // order, instead of relying on Rust's default field-drop order. That default drops struct
+    // fields top-to-bottom (declaration order) -- the opposite of what's needed here, since
+    // Vulkan requires every object be destroyed before the VkDevice/VkInstance it was created
+    // from. See the `Drop` impl below.
+    pub instance: ManuallyDrop<instance::VulkanInstance>,
+    pub device: ManuallyDrop<device::VulkanDevice>,
+    pub swapchain: ManuallyDrop<swapchain::VulkanSwapchain>,
 }
 
 impl VulkanRenderer {
@@ -34,9 +40,9 @@ impl VulkanRenderer {
         )?;
 
         Ok(Self {
-            instance,
-            device,
-            swapchain,
+            instance: ManuallyDrop::new(instance),
+            device: ManuallyDrop::new(device),
+            swapchain: ManuallyDrop::new(swapchain),
         })
     }
 
@@ -61,5 +67,15 @@ impl Drop for VulkanRenderer {
     fn drop(&mut self) {
         log::info!("Destroying Vulkan renderer");
         let _ = self.wait_idle();
+
+        // Explicit order matters here: each of these must be destroyed before the
+        // VkDevice/VkInstance it was created from. `ManuallyDrop::drop` is `unsafe` because
+        // it's on us to guarantee it's called exactly once per field, which the compiler
+        // can't check for us the way it can for ordinary owned values.
+        unsafe {
+            ManuallyDrop::drop(&mut self.swapchain);
+            ManuallyDrop::drop(&mut self.device);
+            ManuallyDrop::drop(&mut self.instance);
+        }
     }
 }
