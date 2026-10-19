@@ -18,14 +18,16 @@ shader — no vertex buffer input yet.
 
 - **Vertex/index buffers.** The vertex shader hardcodes three positions via `gl_VertexIndex` (the same
   approach vulkan-tutorial.com uses before it introduces vertex buffers). Pipeline's vertex input state is
-  therefore empty (no bindings, no attributes). Real buffers are `002-vertex-buffers.md`.
+  therefore empty (no bindings, no attributes). Real buffers, replacing the hardcoded positions, are
+  `003-vertex-buffers.md` — deliberately *after* command buffers (`002`), since hardcoding the positions in
+  the shader means we don't need real buffers to reach the "first triangle" milestone.
 - **Command buffer recording / actually drawing anything.** This spec produces a pipeline object, not pixels
   on screen. Recording `vkCmdBeginRendering` → `vkCmdBindPipeline` → `vkCmdDraw` → `vkCmdEndRendering`,
   including the manual image layout transitions dynamic rendering requires (no render pass to do them for
-  you), is `003-command-buffers.md`.
+  you), is `002-command-buffers-and-render-loop.md`.
 - **Wiring into `VulkanRenderer`.** `GraphicsPipeline` stays standalone (constructed directly from
-  `&VulkanDevice` + a color format + an extent) until `003` needs to drive it from the render loop. Avoids
-  touching `mod.rs` before there's a reason to.
+  `&VulkanDevice` + a color format) until `002` needs to drive it from the render loop. Avoids touching
+  `mod.rs` before there's a reason to.
 - **Descriptor sets, push constants, depth testing.** No uniform data crosses into the shader yet — Phase 2.
   Pipeline layout is empty.
 
@@ -62,7 +64,7 @@ Instead: `.vert`/`.frag` GLSL source lives in `shaders/`, compiled offline with 
 SDK, already a prerequisite per `README.md`) into `shaders/*.spv`, committed to the repo, and loaded at
 compile time via `include_bytes!`. No build.rs, no new build dependency, CI keeps building without a shader
 compiler present. Revisit build-time compilation if/when shader hot-reload during development becomes worth
-the added complexity — that's a `002`/`003`-or-later problem, not this one.
+the added complexity — that's a later-phase problem, not this one.
 
 *(Housekeeping: I'll update `ROADMAP.md`'s Phase 1 bullet to match this decision so the docs don't
 immediately drift from what this spec commits to.)*
@@ -79,12 +81,16 @@ pub struct GraphicsPipeline {
 }
 
 impl GraphicsPipeline {
-    /// `color_format` should be the swapchain's format (`VulkanSwapchain::format`); `extent` its
-    /// current extent. Both become part of the pipeline's fixed-function state (viewport/scissor
-    /// and the dynamic-rendering color attachment format), matching the existing pattern of
-    /// passing swapchain-derived state in rather than the pipeline reaching into VulkanSwapchain
-    /// itself.
-    pub fn new(device: &VulkanDevice, color_format: vk::Format, extent: vk::Extent2D) -> Result<Self>;
+    /// `color_format` should be the swapchain's format (`VulkanSwapchain::format`), matching the
+    /// existing pattern of passing swapchain-derived state in rather than the pipeline reaching
+    /// into `VulkanSwapchain` itself.
+    ///
+    /// No `extent` parameter: viewport and scissor are `VK_DYNAMIC_STATE_VIEWPORT`/`_SCISSOR`
+    /// (set per-frame via `vkCmdSetViewport`/`vkCmdSetScissor` in `command.rs`, not baked into
+    /// the pipeline). Extent can change (window resize); format essentially never does for a
+    /// given swapchain. Baking extent in would mean rebuilding the pipeline on every resize on
+    /// top of rebuilding the swapchain — dynamic state avoids that for free.
+    pub fn new(device: &VulkanDevice, color_format: vk::Format) -> Result<Self>;
 }
 
 impl Drop for GraphicsPipeline {
@@ -134,7 +140,7 @@ drops first), and `VulkanRenderer` declares `instance, device, swapchain` in tha
 (and the `VkSurfaceKHR` it owns). That's backwards: Vulkan requires every object be destroyed before the
 `VkInstance`/`VkDevice` it was created from. This predates this spec and nothing here makes it worse (`
 GraphicsPipeline` isn't being wired into `VulkanRenderer` yet — see Non-goals), but it's worth its own small
-fix (reverse the field order, or make `VulkanRenderer::Drop` explicit) before `003` adds more objects to that
+fix (reverse the field order, or make `VulkanRenderer::Drop` explicit) before `002` adds more objects to that
 struct. Not fixing it here since it's outside this spec's stated scope.
 
 ## Interactions
@@ -163,7 +169,7 @@ is a real "looks fine, is UB" trap, and a good one to have hit once deliberately
 - Manual verification: temporarily construct a `GraphicsPipeline` in `examples/triangle.rs` right after
   swapchain creation, then let it drop before the render loop starts. Run with validation layers on (default
   in debug builds) and confirm **zero** validation errors/warnings in the log output. This confirms the
-  pipeline is well-formed and cleanly destroyed *before* `003` adds anything that draws with it — isolating
+  pipeline is well-formed and cleanly destroyed *before* `002` adds anything that draws with it — isolating
   "does the pipeline object work" from "does drawing with it work" is the point of scoping this spec the way
   Non-goals does.
 
