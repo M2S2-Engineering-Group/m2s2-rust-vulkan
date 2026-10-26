@@ -22,13 +22,13 @@ on to Phase 1.
 The minimum an engine needs to put anything on screen at all. This is what `pipeline.rs`, `buffer.rs`, and
 `command.rs` are stubbed out for.
 
-- [ ] **Shader pipeline**: GLSL compiled offline to SPIR-V via `glslc`, committed to `shaders/*.spv`, loaded
+- [x] **Shader pipeline**: GLSL compiled offline to SPIR-V via `glslc`, committed to `shaders/*.spv`, loaded
       via `include_bytes!` + `ash::util::read_spv` — see
       [specs/001-graphics-pipeline.md](specs/001-graphics-pipeline.md) for why build-time `shaderc`
       compilation was passed over for now
-- [ ] **Graphics pipeline object**: vertex input, input assembly, viewport/scissor, rasterization state,
+- [x] **Graphics pipeline object**: vertex input, input assembly, viewport/scissor, rasterization state,
       color blend state
-- [ ] **Render target strategy**: dynamic rendering (`VK_KHR_dynamic_rendering`, core in Vulkan 1.3) vs.
+- [x] **Render target strategy**: dynamic rendering (`VK_KHR_dynamic_rendering`, core in Vulkan 1.3) vs.
       classic render pass + framebuffer objects — **decide this before writing `pipeline.rs`**, not after.
       Dynamic rendering avoids framebuffer-object bookkeeping and composes far better with the multi-pass
       work in Phase 4 (shadow maps, deferred shading, post-processing all become "render into a different
