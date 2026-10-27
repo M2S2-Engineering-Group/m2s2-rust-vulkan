@@ -2,23 +2,13 @@
 // (dynamic rendering vs. render pass, precompiled SPIR-V vs. build-time shaderc, why there's no
 // `extent` parameter).
 
-use crate::error::Result; // TODO(spec 001): you'll also need VulkanError once `new()` below maps
-                          // real ash::vk::Result errors -- add it back to this import then.
+use crate::error::{Result, VulkanError};
 use crate::renderer::device::VulkanDevice;
 use ash::vk;
+use std::io::Cursor;
 
-// TODO(spec 001, step 0 -- do this first, it's a prerequisite for everything else here):
-// compile the GLSL in `shaders/` to SPIR-V. `glslc` isn't installed in this environment; the
-// pragmatic substitute is `glslang-tools` (apt package, ships `glslangValidator`):
-//
-//     sudo apt-get install -y glslang-tools
-//     glslangValidator -V shaders/triangle.vert -o shaders/triangle.vert.spv
-//     glslangValidator -V shaders/triangle.frag -o shaders/triangle.frag.spv
-//
-// (If you do have the real Vulkan SDK's `glslc` available instead, the equivalent is
-// `glslc shaders/triangle.vert -o shaders/triangle.vert.spv`.) Commit the two `.spv` files --
-// see specs/001-graphics-pipeline.md's "Decision: precompiled SPIR-V" for why they're checked in
-// rather than compiled by a build.rs.
+// Precompiled SPIR-V, committed to the repo (see specs/001 "Decision: precompiled SPIR-V").
+// Recompile after editing: glslc shaders/triangle.vert -o shaders/triangle.vert.spv
 const VERTEX_SHADER: &[u8] = include_bytes!("../../shaders/triangle.vert.spv");
 const FRAGMENT_SHADER: &[u8] = include_bytes!("../../shaders/triangle.frag.spv");
 
@@ -31,73 +21,133 @@ pub struct GraphicsPipeline {
 }
 
 impl GraphicsPipeline {
-    pub fn new(_device: &VulkanDevice, _color_format: vk::Format) -> Result<Self> {
-        // TODO(spec 001): load both shader modules. Use `ash::util::read_spv`, NOT
-        // `bytemuck::cast_slice` -- `include_bytes!` gives `&[u8]` with no alignment guarantee,
-        // and `VkShaderModuleCreateInfo::code` needs `&[u32]`. `read_spv` handles this correctly
-        // regardless of input alignment; a raw cast would be UB if the bytes happen not to be
-        // 4-byte aligned. Source: https://docs.rs/ash/latest/ash/util/fn.read_spv.html
-        //
-        //     let vertex_code = ash::util::read_spv(&mut std::io::Cursor::new(VERTEX_SHADER))
-        //         .map_err(|e| VulkanError::InitializationError(format!("bad vertex SPIR-V: {e}")))?;
-        //     let vertex_module = Self::create_shader_module(&device.device, &vertex_code)?;
-        //     // ...same for FRAGMENT_SHADER...
-        //
-        // Both shader modules are only needed *during* pipeline creation (see the Vulkan objects
-        // table in specs/001-graphics-pipeline.md) -- destroy them with `device.destroy_shader_module`
-        // right after `create_graphics_pipelines` below returns, before this function returns.
+    /// `color_format` should be the swapchain's format (`VulkanSwapchain::format`). No `extent`
+    /// parameter: viewport and scissor are dynamic state, set per-frame in `command.rs` (spec 002).
+    pub fn new(device: &VulkanDevice, color_format: vk::Format) -> Result<Self> {
+        let device = &device.device;
 
-        // TODO(spec 001): build the two `VkPipelineShaderStageCreateInfo` entries (VERTEX stage
-        // using vertex_module, FRAGMENT stage using fragment_module), entry point `c"main"`.
+        // include_bytes! gives &[u8] with no alignment guarantee; VkShaderModuleCreateInfo wants
+        // &[u32]. read_spv reads the little-endian SPIR-V words correctly regardless of alignment
+        // (a raw bytemuck cast would be UB on an unaligned slice).
+        let vertex_code = ash::util::read_spv(&mut Cursor::new(VERTEX_SHADER))
+            .map_err(|e| VulkanError::InitializationError(format!("bad vertex SPIR-V: {e}")))?;
+        let fragment_code = ash::util::read_spv(&mut Cursor::new(FRAGMENT_SHADER))
+            .map_err(|e| VulkanError::InitializationError(format!("bad fragment SPIR-V: {e}")))?;
 
-        // TODO(spec 001): vertex input state is EMPTY -- no bindings, no attributes.
-        // `vk::PipelineVertexInputStateCreateInfo::default()` with nothing else set is correct;
-        // the shader hardcodes positions via `gl_VertexIndex` (see shaders/triangle.vert).
+        let vertex_module = Self::create_shader_module(device, &vertex_code)?;
+        let fragment_module = Self::create_shader_module(device, &fragment_code)?;
 
-        // TODO(spec 001): input assembly = `TRIANGLE_LIST`, `primitive_restart_enable(false)`.
+        let entry_name = c"main";
+        let stages = [
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vertex_module)
+                .name(entry_name),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(fragment_module)
+                .name(entry_name),
+        ];
 
-        // TODO(spec 001): viewport state needs `viewport_count(1)` and `scissor_count(1)` but NO
-        // actual `VkViewport`/`VkRect2D` values -- those come from dynamic state instead (see the
-        // "No `extent` parameter" note on this function's doc comment in the spec). Pair this
-        // with a `VkPipelineDynamicStateCreateInfo` listing `vk::DynamicState::VIEWPORT` and
-        // `vk::DynamicState::SCISSOR`. Source for why dynamic viewport/scissor is the standard
-        // modern approach (not just a shortcut): Vulkan Tutorial's "Fixed functions" chapter,
-        // dynamic state section, https://vulkan-tutorial.com/Drawing_a_triangle/Graphics_pipeline_basics/Fixed_functions
+        // Empty vertex input: positions are hardcoded in the vertex shader via gl_VertexIndex.
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
 
-        // TODO(spec 001): rasterization state -- `polygon_mode(FILL)`, `cull_mode(BACK)`,
-        // `front_face(CLOCKWISE)` (matches the hardcoded triangle's winding order in
-        // shaders/triangle.vert -- if the triangle doesn't render, a mismatched front_face
-        // against cull_mode is a likely first suspect), `line_width(1.0)`.
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
 
-        // TODO(spec 001): multisample state -- disabled for now (`rasterization_samples(TYPE_1)`,
-        // `sample_shading_enable(false)`). MSAA is a Phase 4 roadmap item, not today.
+        // Viewport/scissor are dynamic: declare the counts here, supply the actual rects per-frame
+        // via vkCmdSetViewport/vkCmdSetScissor (spec 002). Avoids rebuilding on window resize.
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewport_count(1)
+            .scissor_count(1);
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
-        // TODO(spec 001): color blend state -- one `VkPipelineColorBlendAttachmentState` with
-        // `blend_enable(false)` and `color_write_mask` set to all four channels (R|G|B|A).
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(vk::PolygonMode::FILL)
+            .cull_mode(vk::CullModeFlags::BACK)
+            .front_face(vk::FrontFace::CLOCKWISE)
+            .line_width(1.0);
 
-        // TODO(spec 001): pipeline layout -- empty. No descriptor set layouts, no push constant
-        // ranges (Phase 2 adds these once there's uniform data to pass in).
-        //
-        //     let pipeline_layout = unsafe {
-        //         device.device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default(), None)
-        //             .map_err(VulkanError::from)?
-        //     };
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1)
+            .sample_shading_enable(false);
 
-        // TODO(spec 001): the dynamic-rendering-specific part -- chain
-        // `vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&[color_format])`
-        // into `VkGraphicsPipelineCreateInfo` via `.push_next(...)`, and do NOT call
-        // `.render_pass(...)` anywhere (that's the classic render-pass API this spec deliberately
-        // isn't using). Source: same Vulkan-Samples dynamic_rendering link as device.rs's TODO.
+        let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(false)
+            .color_write_mask(vk::ColorComponentFlags::RGBA)];
+        let color_blending =
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
 
-        // TODO(spec 001): `create_graphics_pipelines` takes a `vk::PipelineCache` (pass
-        // `vk::PipelineCache::null()` -- pipeline caching is a later optimization, not today) and
-        // a slice of create-infos (just the one, for now). Destroy both shader modules
-        // immediately after this call succeeds.
+        // Empty layout: no descriptor sets, no push constants until Phase 2.
+        let pipeline_layout = unsafe {
+            device
+                .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default(), None)
+                .map_err(VulkanError::from)?
+        };
 
-        let _ = (VERTEX_SHADER, FRAGMENT_SHADER);
-        todo!(
-            "implement per specs/001-graphics-pipeline.md -- see the TODO comments above, in order"
-        )
+        // Dynamic rendering: the pipeline declares the color-attachment *format* it targets via
+        // push_next, instead of being bound to a VkRenderPass + subpass. No .render_pass(...) call.
+        let color_formats = [color_format];
+        let mut rendering_info =
+            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&color_formats);
+
+        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&stages)
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .color_blend_state(&color_blending)
+            .dynamic_state(&dynamic_state)
+            .layout(pipeline_layout)
+            .push_next(&mut rendering_info);
+
+        let pipeline_result = unsafe {
+            device.create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+        };
+
+        // Shader modules are only needed during pipeline creation — destroy them now, regardless of
+        // whether creation succeeded.
+        unsafe {
+            device.destroy_shader_module(vertex_module, None);
+            device.destroy_shader_module(fragment_module, None);
+        }
+
+        // create_graphics_pipelines reports failure as (partial pipelines, result) — clean up any
+        // partial pipeline plus the layout so neither leaks before returning the error.
+        let pipeline = match pipeline_result {
+            Ok(pipelines) => pipelines[0],
+            Err((pipelines, result)) => {
+                for p in pipelines {
+                    if p != vk::Pipeline::null() {
+                        unsafe { device.destroy_pipeline(p, None) };
+                    }
+                }
+                unsafe { device.destroy_pipeline_layout(pipeline_layout, None) };
+                return Err(VulkanError::from(result));
+            }
+        };
+
+        log::debug!("Graphics pipeline created");
+
+        Ok(Self {
+            pipeline,
+            pipeline_layout,
+            device: device.clone(),
+        })
+    }
+
+    fn create_shader_module(device: &ash::Device, code: &[u32]) -> Result<vk::ShaderModule> {
+        let create_info = vk::ShaderModuleCreateInfo::default().code(code);
+        unsafe {
+            device
+                .create_shader_module(&create_info, None)
+                .map_err(VulkanError::from)
+        }
     }
 }
 
@@ -105,11 +155,33 @@ impl Drop for GraphicsPipeline {
     fn drop(&mut self) {
         // Pipeline before layout: a layout can't be destroyed while a pipeline created from it
         // still exists -- same "children before parents" rule as the mod.rs VulkanRenderer fix,
-        // just one level shallower here. This part isn't a TODO -- it's already correct and will
-        // stay correct once `new()` above actually populates real handles.
+        // just one level shallower here.
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
-            self.device.destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // SPIR-V's first word is a fixed magic number; a correctly compiled .spv always starts with it.
+    const SPIRV_MAGIC: u32 = 0x0723_0203;
+
+    #[test]
+    fn vertex_spirv_parses_and_starts_with_magic() {
+        let words = ash::util::read_spv(&mut Cursor::new(VERTEX_SHADER))
+            .expect("vertex .spv should parse via read_spv");
+        assert_eq!(words.first().copied(), Some(SPIRV_MAGIC));
+    }
+
+    #[test]
+    fn fragment_spirv_parses_and_starts_with_magic() {
+        let words = ash::util::read_spv(&mut Cursor::new(FRAGMENT_SHADER))
+            .expect("fragment .spv should parse via read_spv");
+        assert_eq!(words.first().copied(), Some(SPIRV_MAGIC));
     }
 }
