@@ -34,16 +34,16 @@ The minimum an engine needs to put anything on screen at all. This is what `pipe
       work in Phase 4 (shadow maps, deferred shading, post-processing all become "render into a different
       set of attachments," not "build another framebuffer graph"). Retrofitting this later means rewriting
       `pipeline.rs` and every draw call.
-- [ ] **Command pool & buffers**: recorded per-frame; structure recording so it can later be split per
+- [x] **Command pool & buffers**: recorded per-frame; structure recording so it can later be split per
       render pass (Phase 4 multi-threading) instead of one monolithic record function
-- [ ] **Synchronization**: semaphores (image-available, render-finished), fences (frame-in-flight), a named
+- [x] **Synchronization**: semaphores (image-available, render-finished), fences (frame-in-flight), a named
       `FRAMES_IN_FLIGHT` constant rather than a hardcoded `2` scattered through the code
 - [ ] **Memory allocation strategy**: adopt `gpu-allocator` now rather than raw `vkAllocateMemory` per
       buffer/image — this is a foundational decision `buffer.rs` and later texture support both build on;
       switching allocators after buffer/image code exists is a rewrite, not an addition
 - [ ] **Vertex & index buffers**: staging buffer → device-local transfer pattern
 - [ ] **Swapchain recreation** on resize (the `triangle.rs` resize handler is currently a `TODO`)
-- [ ] **First triangle** rendered end-to-end
+- [x] **First triangle** rendered end-to-end
 
 **Milestone**: hardcoded triangle renders and survives a window resize.
 
