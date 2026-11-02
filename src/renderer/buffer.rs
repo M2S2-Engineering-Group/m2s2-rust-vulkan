@@ -1,7 +1,15 @@
 // Vertex data types and GPU buffers. See specs/003-vertex-buffers.md.
 
+use crate::error::{Result, VulkanError};
 use crate::math::Vec3;
+use crate::renderer::allocator::Allocator;
+use crate::renderer::device::VulkanDevice;
 use ash::vk;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
+use gpu_allocator::MemoryLocation;
+
+/// Index type for index buffers — `u16` (bound as `vk::IndexType::UINT16`).
+pub type Index = u16;
 
 /// A single vertex: a position and a color, both in clip space / RGB. `#[repr(C)]` + `Pod` so a
 /// `&[Vertex]` can be uploaded to a GPU buffer byte-for-byte (see `Buffer`). `Vec3` is
@@ -38,6 +46,166 @@ impl Vertex {
                 .offset(std::mem::offset_of!(Vertex, color) as u32),
         ]
     }
+}
+
+/// A device-local GPU buffer whose contents were uploaded once via a staging buffer. Not `Drop`:
+/// freeing the allocation needs `&mut Allocator`, so call `destroy` explicitly before the
+/// `Allocator` is torn down (see specs/003). `#[allow(dead_code)]` comes off when `VulkanRenderer`
+/// owns these in the wiring step.
+pub struct Buffer {
+    pub(crate) buffer: vk::Buffer,
+    allocation: Option<Allocation>,
+    len: u32,
+}
+
+impl Buffer {
+    /// Create a `DEVICE_LOCAL` buffer of `usage` and upload `data` into it via a transient
+    /// host-visible staging buffer + a one-time `vkCmdCopyBuffer`.
+    #[allow(dead_code)]
+    pub(crate) fn new_device_local<T: bytemuck::Pod>(
+        device: &VulkanDevice,
+        allocator: &mut Allocator,
+        data: &[T],
+        usage: vk::BufferUsageFlags,
+    ) -> Result<Self> {
+        let bytes: &[u8] = bytemuck::cast_slice(data);
+        let size = bytes.len() as u64;
+
+        // Staging buffer in host-visible memory; gpu-allocator maps it, so we can memcpy straight in.
+        let (staging, mut staging_alloc) = create_buffer(
+            device,
+            allocator,
+            size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            MemoryLocation::CpuToGpu,
+            "staging",
+        )?;
+        staging_alloc
+            .mapped_slice_mut()
+            .expect("CpuToGpu allocation is host-visible and mapped")[..bytes.len()]
+            .copy_from_slice(bytes);
+
+        // Device-local destination (also a transfer target).
+        let (buffer, allocation) = create_buffer(
+            device,
+            allocator,
+            size,
+            usage | vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::GpuOnly,
+            "device-local",
+        )?;
+
+        copy_buffer(device, staging, buffer, size)?;
+
+        // Staging is transient — free it now that the copy has completed.
+        unsafe { device.device.destroy_buffer(staging, None) };
+        allocator.free(staging_alloc)?;
+
+        Ok(Self {
+            buffer,
+            allocation: Some(allocation),
+            len: data.len() as u32,
+        })
+    }
+
+    /// Element count (vertices or indices), for `cmd_draw` / `cmd_draw_indexed`.
+    #[allow(dead_code)]
+    pub(crate) fn len(&self) -> u32 {
+        self.len
+    }
+
+    /// Destroy the buffer and return its allocation to the allocator. Must run before the
+    /// `Allocator` is dropped.
+    #[allow(dead_code)]
+    pub(crate) fn destroy(&mut self, device: &VulkanDevice, allocator: &mut Allocator) {
+        unsafe { device.device.destroy_buffer(self.buffer, None) };
+        if let Some(allocation) = self.allocation.take() {
+            let _ = allocator.free(allocation);
+        }
+    }
+}
+
+/// Create a `VkBuffer`, allocate memory of `location` for it, and bind them.
+#[allow(dead_code)]
+fn create_buffer(
+    device: &VulkanDevice,
+    allocator: &mut Allocator,
+    size: u64,
+    usage: vk::BufferUsageFlags,
+    location: MemoryLocation,
+    name: &str,
+) -> Result<(vk::Buffer, Allocation)> {
+    let info = vk::BufferCreateInfo::default()
+        .size(size)
+        .usage(usage)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let buffer = unsafe {
+        device
+            .device
+            .create_buffer(&info, None)
+            .map_err(VulkanError::from)?
+    };
+    let requirements = unsafe { device.device.get_buffer_memory_requirements(buffer) };
+    let allocation = allocator.allocate(&AllocationCreateDesc {
+        name,
+        requirements,
+        location,
+        linear: true, // buffers are always linear
+        allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+    })?;
+    unsafe {
+        device
+            .device
+            .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
+            .map_err(VulkanError::from)?;
+    }
+    Ok((buffer, allocation))
+}
+
+/// Copy `size` bytes `src -> dst` via a one-time command buffer on the graphics queue, waiting on
+/// a fence for completion (startup-only; fine to block here).
+#[allow(dead_code)]
+fn copy_buffer(device: &VulkanDevice, src: vk::Buffer, dst: vk::Buffer, size: u64) -> Result<()> {
+    let dev = &device.device;
+    let pool_info = vk::CommandPoolCreateInfo::default()
+        .queue_family_index(device.graphics_queue_family)
+        .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+    let pool = unsafe {
+        dev.create_command_pool(&pool_info, None)
+            .map_err(VulkanError::from)?
+    };
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1);
+    let cmd = unsafe {
+        dev.allocate_command_buffers(&alloc_info)
+            .map_err(VulkanError::from)?
+    }[0];
+
+    unsafe {
+        dev.begin_command_buffer(
+            cmd,
+            &vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+        )
+        .map_err(VulkanError::from)?;
+        dev.cmd_copy_buffer(cmd, src, dst, &[vk::BufferCopy::default().size(size)]);
+        dev.end_command_buffer(cmd).map_err(VulkanError::from)?;
+
+        let cmds = [cmd];
+        let submit = vk::SubmitInfo::default().command_buffers(&cmds);
+        let fence = dev
+            .create_fence(&vk::FenceCreateInfo::default(), None)
+            .map_err(VulkanError::from)?;
+        dev.queue_submit(device.graphics_queue, &[submit], fence)
+            .map_err(VulkanError::from)?;
+        dev.wait_for_fences(&[fence], true, u64::MAX)
+            .map_err(VulkanError::from)?;
+        dev.destroy_fence(fence, None);
+        dev.destroy_command_pool(pool, None);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
