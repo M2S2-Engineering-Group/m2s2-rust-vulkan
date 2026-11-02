@@ -24,22 +24,84 @@ impl VulkanSwapchain {
     ) -> Result<Self> {
         let surface = instance.create_surface(display_handle, window_handle)?;
         let surface_loader = ash::khr::surface::Instance::new(&instance.entry, &instance.instance);
+        let swapchain_loader = swapchain::Device::new(&instance.instance, &device.device);
 
-        let swapchain_support =
-            Self::query_swapchain_support(&surface_loader, device.physical_device, surface)?;
+        let parts = Self::build_parts(
+            &swapchain_loader,
+            &surface_loader,
+            device,
+            surface,
+            window_extent,
+            vk::SwapchainKHR::null(),
+        )?;
 
-        let surface_format = Self::choose_swap_surface_format(&swapchain_support.formats);
-        let present_mode = Self::choose_swap_present_mode(&swapchain_support.present_modes);
-        let extent = Self::choose_swap_extent(&swapchain_support.capabilities, window_extent);
+        Ok(Self {
+            swapchain_loader,
+            swapchain: parts.swapchain,
+            images: parts.images,
+            image_views: parts.image_views,
+            format: parts.format,
+            extent: parts.extent,
+            surface_loader,
+            surface,
+        })
+    }
 
-        let mut image_count = swapchain_support.capabilities.min_image_count + 1;
-        if swapchain_support.capabilities.max_image_count > 0
-            && image_count > swapchain_support.capabilities.max_image_count
-        {
-            image_count = swapchain_support.capabilities.max_image_count;
+    /// Recreate the swapchain + image views at `new_extent` (reusing the surface) after a resize.
+    /// The caller must have waited for the device to be idle. Destroys the old image views + the
+    /// old swapchain. `#[allow(dead_code)]` comes off when `VulkanRenderer` drives it.
+    #[allow(dead_code)]
+    pub(crate) fn recreate(&mut self, device: &VulkanDevice, new_extent: (u32, u32)) -> Result<()> {
+        let parts = Self::build_parts(
+            &self.swapchain_loader,
+            &self.surface_loader,
+            device,
+            self.surface,
+            new_extent,
+            self.swapchain, // passed as old_swapchain for a smoother handoff
+        )?;
+
+        unsafe {
+            for &view in &self.image_views {
+                device.device.destroy_image_view(view, None);
+            }
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
         }
 
-        let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
+        self.swapchain = parts.swapchain;
+        self.images = parts.images;
+        self.image_views = parts.image_views;
+        self.format = parts.format;
+        self.extent = parts.extent;
+        Ok(())
+    }
+
+    /// Build a swapchain + its image views sized from `extent_hint` (clamped against the surface's
+    /// capabilities). Shared by `new` and `recreate`; pass `vk::SwapchainKHR::null()` as
+    /// `old_swapchain` on first creation.
+    fn build_parts(
+        swapchain_loader: &swapchain::Device,
+        surface_loader: &ash::khr::surface::Instance,
+        device: &VulkanDevice,
+        surface: vk::SurfaceKHR,
+        extent_hint: (u32, u32),
+        old_swapchain: vk::SwapchainKHR,
+    ) -> Result<SwapchainParts> {
+        let support =
+            Self::query_swapchain_support(surface_loader, device.physical_device, surface)?;
+        let surface_format = Self::choose_swap_surface_format(&support.formats);
+        let present_mode = Self::choose_swap_present_mode(&support.present_modes);
+        let extent = Self::choose_swap_extent(&support.capabilities, extent_hint);
+
+        let mut image_count = support.capabilities.min_image_count + 1;
+        if support.capabilities.max_image_count > 0
+            && image_count > support.capabilities.max_image_count
+        {
+            image_count = support.capabilities.max_image_count;
+        }
+
+        let create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
             .min_image_count(image_count)
             .image_format(surface_format.format)
@@ -48,35 +110,30 @@ impl VulkanSwapchain {
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .pre_transform(swapchain_support.capabilities.current_transform)
+            .pre_transform(support.capabilities.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
             .present_mode(present_mode)
-            .clipped(true);
+            .clipped(true)
+            .old_swapchain(old_swapchain);
 
-        let swapchain_loader = swapchain::Device::new(&instance.instance, &device.device);
         let swapchain = unsafe {
             swapchain_loader
-                .create_swapchain(&swapchain_create_info, None)
+                .create_swapchain(&create_info, None)
                 .map_err(VulkanError::from)?
         };
-
         let images = unsafe {
             swapchain_loader
                 .get_swapchain_images(swapchain)
                 .map_err(VulkanError::from)?
         };
-
         let image_views = Self::create_image_views(&device.device, &images, surface_format.format)?;
 
-        Ok(Self {
-            swapchain_loader,
+        Ok(SwapchainParts {
             swapchain,
             images,
             image_views,
             format: surface_format.format,
             extent,
-            surface_loader,
-            surface,
         })
     }
 
@@ -198,6 +255,15 @@ struct SwapchainSupportDetails {
     capabilities: vk::SurfaceCapabilitiesKHR,
     formats: Vec<vk::SurfaceFormatKHR>,
     present_modes: Vec<vk::PresentModeKHR>,
+}
+
+/// The swapchain objects produced by `build_parts`, consumed by `new`/`recreate`.
+struct SwapchainParts {
+    swapchain: vk::SwapchainKHR,
+    images: Vec<vk::Image>,
+    image_views: Vec<vk::ImageView>,
+    format: vk::Format,
+    extent: vk::Extent2D,
 }
 
 impl Drop for VulkanSwapchain {
