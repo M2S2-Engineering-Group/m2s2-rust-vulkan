@@ -128,4 +128,23 @@ duplicating it (CLAUDE.md "shared before one-off").
 
 ## Outcome
 
-_(Filled in after implementation.)_
+Implemented and verified — **resize works smoothly, no distortion or errors** (confirmed interactively:
+drag-resize, maximize, restore, minimize/restore) on an Apple M5 / `kosmickrisp` driver, plus a clean shutdown.
+
+Matched the spec: only the **swapchain + image views** are recreated (`VulkanSwapchain::recreate`), reusing the
+surface — the pipeline (dynamic viewport/scissor) and the absence of framebuffers/render pass (dynamic
+rendering) mean nothing else rebuilds. `new` and `recreate` share a `build_parts` helper (DRY). Detection is
+caller-notified via `VulkanRenderer::resize` plus an `OUT_OF_DATE`/`SUBOPTIMAL` backstop; `draw_frame` returns
+`FrameOutcome`; minimize (0-sized) pauses rendering; `pending_resize: Option<(u32, u32)>`.
+
+**Discovered pre-existing bug (growing part fixed, shutdown part deferred):** `VulkanSwapchain::Drop` destroys
+the swapchain + surface but **not the image views** — the struct holds no device handle, so `Drop` can't. That
+was a leak on every swapchain lifetime. `recreate` now destroys the old image views each resize (fixing the
+*per-resize growing* leak — the one that matters). The remaining *shutdown* image-view leak needs the swapchain
+to hold a cloned `ash::Device` (so `Drop` can destroy them) or the renderer to destroy them — deferred to
+**005**, where validation layers will flag it and confirm the fix.
+
+**Carried over to 005 (validation layers), where they're verifiable:**
+- The per-swapchain-image `render_finished` semaphore fix (002 carryover).
+- The shutdown image-view leak above.
+- Enabling `VK_LAYER_KHRONOS_validation` itself (`instance.rs` `layer_names` still empty).

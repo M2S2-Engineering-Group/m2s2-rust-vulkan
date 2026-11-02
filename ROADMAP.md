@@ -42,7 +42,7 @@ The minimum an engine needs to put anything on screen at all. This is what `pipe
       buffer/image — this is a foundational decision `buffer.rs` and later texture support both build on;
       switching allocators after buffer/image code exists is a rewrite, not an addition
 - [x] **Vertex & index buffers**: staging buffer → device-local transfer pattern
-- [ ] **Swapchain recreation** on resize (the `triangle.rs` resize handler is currently a `TODO`)
+- [x] **Swapchain recreation** on resize
 - [x] **First triangle** rendered end-to-end
 
 **Milestone**: hardcoded triangle renders and survives a window resize.
