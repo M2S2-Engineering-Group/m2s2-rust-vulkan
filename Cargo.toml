@@ -10,7 +10,8 @@ ash-window = "0.13"
 # Surface handle types for the renderer's public API (window ownership lives with the caller)
 raw-window-handle = "0.6"
 # Math library (published to crates.io; override locally with .cargo/config.toml for cross-repo dev)
-m2s2-math = "0.2"
+# `bytemuck` feature (added in 0.2.2) makes its vectors Pod, so Vertex (position/color: Vec3) uploads to GPU buffers.
+m2s2-math = { version = "0.2.2", features = ["bytemuck"] }
 # Utility for safe transmutation
 bytemuck = { version = "1.14", features = ["derive"] }
 # Logging
@@ -18,6 +19,8 @@ log = "0.4"
 env_logger = "0.10"
 # Error handling
 anyhow = "1.0"
+# GPU memory allocator (vulkan backend only — skip the default d3d12/metal backends)
+gpu-allocator = { version = "0.28", default-features = false, features = ["vulkan", "std"] }
 
 [dev-dependencies]
 # For examples and tests
