@@ -111,11 +111,12 @@ impl Allocator {
 }
 ```
 
-The quad is 4 `Vertex` (corners at `±0.5`, `z = 0`, distinct colors) and 6 `Index` (`[0, 1, 2, 2, 3, 0]`),
-defined in `buffer.rs`. If `Vec3::new` is not `const`, the vertex data is a small constructor `fn` rather
-than a `const` array (`[f32; 3]` would allow a `const` — minor cost of using `Vec3`). Winding must match the
-pipeline's `front_face = CLOCKWISE` / `cull = BACK` from 001 — if the quad renders black/empty, reversed
-winding is the first suspect (same gotcha 001 flagged).
+**Geometry is caller-supplied — the library defines no concrete meshes.** This is a library, so the quad's
+4 `Vertex` (corners at `±0.5`, `z = 0`, distinct colors) and 6 `Index` (`[0, 1, 2, 2, 3, 0]`) live in the
+**consumer** (`examples/triangle.rs`), not in `src/`. `VulkanRenderer::new` takes `vertices: &[Vertex]` and
+`indices: &[Index]` from the caller and uploads them into buffers it owns. Winding must match the pipeline's
+`front_face = CLOCKWISE` / `cull = BACK` from 001 — if the quad renders black/empty, reversed winding is the
+first suspect (same gotcha 001 flagged).
 
 **Why `Vec3`, not `[f32; 3]`** (decided during review): position is genuinely a point in space and shares the
 type the Phase-2 matrices will transform; `m2s2-math` is built for this (its `bytemuck` feature + `repr(C)`
@@ -147,9 +148,13 @@ it. `allocator`, like the others, is `ManuallyDrop` and torn down in that explic
 - **`command.rs` (002):** `draw_frame` records `cmd_bind_vertex_buffers`, `cmd_bind_index_buffer` (UINT16),
   and `cmd_draw_indexed(index_count, …)` instead of `cmd_draw(3, …)`. **Signature change:** `draw_frame` takes
   the vertex and index `&Buffer` (passed from `render_frame`).
-- **`mod.rs`:** `VulkanRenderer` gains `allocator`, `vertex_buffer`, `index_buffer` fields; constructs them
-  after the swapchain (allocator, then the two buffers) and before the pipeline/frame context; `render_frame`
-  passes the buffers to `draw_frame`; `Drop` extends the teardown chain + the explicit buffer `destroy` calls.
+- **`mod.rs`:** `VulkanRenderer::new` gains `vertices: &[Vertex]` + `indices: &[Index]` params (caller-supplied
+  geometry). `VulkanRenderer` gains `allocator`, `vertex_buffer`, `index_buffer` fields; constructs them after
+  the swapchain (allocator, then the two buffers from the passed-in data) and before the pipeline/frame
+  context; `render_frame` passes the buffers to `draw_frame`; `Drop` extends the teardown chain + the explicit
+  buffer `destroy` calls. (A mesh/asset API instead of geometry-through-`new` is a later non-goal.)
+- **`examples/triangle.rs`:** defines the quad's `Vertex`/`Index` arrays locally and passes them to
+  `VulkanRenderer::new` — the library stays geometry-free.
 - **shaders:** `triangle.vert` takes `layout(location=0) in vec3 inPosition; layout(location=1) in vec3
   inColor;` instead of the hardcoded arrays (recompile + recommit `triangle.vert.spv`). `triangle.frag`
   unchanged. The shaders become geometry-agnostic pass-throughs (names kept — see Open questions).
@@ -192,4 +197,34 @@ it. `allocator`, like the others, is `ManuallyDrop` and torn down in that explic
 
 ## Outcome
 
-_(Filled in after implementation.)_
+Implemented and verified — **the indexed quad renders** (four distinctly-colored corners,
+Gouraud-interpolated across the face) on an Apple M5 / `kosmickrisp` driver, with a clean shutdown (no
+validation errors) exercising the extended teardown (`frame_context → pipeline → index_buffer →
+vertex_buffer → allocator → swapchain → device → instance`). Winding matched `cull BACK` / `front_face
+CLOCKWISE` on the first try — the square was not culled.
+
+What matched the spec: `gpu-allocator` wrapped behind `allocator::Allocator` (the crate is touched in exactly
+one place), `Buffer::new_device_local` with the staging → device-local transfer, `Vertex { position, color }`
+as `Vec3`, and `cmd_draw_indexed` of 6 indices over 4 vertices.
+
+**Prerequisite that surfaced:** `Vec3`-as-`Pod` needs `m2s2-math`'s `bytemuck` feature, which existed on that
+crate's `main` but was **unreleased**. Published `m2s2-math 0.2.2` to crates.io first (its repo is the sibling
+`../m2s2-rust-math`), then depended on it here — a reminder that cross-repo features must ship before this
+engine's CI can use them.
+
+**Deviations (all small, allowed):**
+- **Geometry moved to the consumer.** This is a library, so the quad's vertices/indices live in
+  `examples/triangle.rs`, not `src/`. `VulkanRenderer::new` gained `vertices: &[Vertex]` + `indices: &[Index]`
+  params (a mesh/asset API instead is a later non-goal). `Vertex`/`Index` are re-exported from the crate root.
+- `command.rs`'s private `record` carries `#[allow(clippy::too_many_arguments)]` — command recording needs the
+  handles; a mesh-bundle abstraction is deferred.
+
+**Open questions resolved:** buffer freeing is explicit `destroy(&mut allocator)` (not `Arc<Mutex>`); the error
+is a dedicated `VulkanError::AllocationError`; shaders kept the `triangle.*` names (now generic pass-throughs).
+
+**Known limitations (deliberate / carried over):**
+- `Buffer::new_device_local` can leak the staging buffer on a mid-upload failure (near-impossible path; matches
+  the simplicity used in 001/002 — worth tidying with the other error-path notes).
+- Validation layers are still not enabled (`instance.rs` empty `layer_names`), so "no validation errors" is
+  only as strong as the debug messenger — still worth its own spec (carried from 001/002).
+- A hand-written Level-1 sub-allocator behind the same `Buffer` interface remains a planned learning spike.
