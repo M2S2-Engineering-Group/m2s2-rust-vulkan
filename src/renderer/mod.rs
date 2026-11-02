@@ -31,6 +31,9 @@ pub struct VulkanRenderer {
     pub vertex_buffer: buffer::Buffer,
     pub index_buffer: buffer::Buffer,
     pub allocator: ManuallyDrop<allocator::Allocator>,
+    // A pending resize target in physical pixels; the next `render_frame` recreates the swapchain to
+    // it. Set by `resize` and by an out-of-date frame. `None` = nothing pending.
+    pending_resize: Option<(u32, u32)>,
 }
 
 impl VulkanRenderer {
@@ -85,17 +88,44 @@ impl VulkanRenderer {
             vertex_buffer,
             index_buffer,
             allocator: ManuallyDrop::new(allocator),
+            pending_resize: None,
         })
     }
 
+    /// Notify the renderer that the window surface resized to `new_extent` (physical pixels). The
+    /// next `render_frame` recreates the swapchain before drawing; a zero dimension (minimized)
+    /// pauses rendering until it's non-zero again.
+    pub fn resize(&mut self, new_extent: (u32, u32)) {
+        self.pending_resize = Some(new_extent);
+    }
+
     pub fn render_frame(&mut self) -> Result<()> {
-        self.frame_context.draw_frame(
+        if let Some((width, height)) = self.pending_resize {
+            if width == 0 || height == 0 {
+                // Minimized: can't build a swapchain. Keep the pending size and skip drawing.
+                return Ok(());
+            }
+            self.wait_idle()?;
+            self.swapchain.recreate(&self.device, (width, height))?;
+            self.pending_resize = None;
+        }
+
+        match self.frame_context.draw_frame(
             &self.device,
             &self.pipeline,
             &self.swapchain,
             &self.vertex_buffer,
             &self.index_buffer,
-        )
+        )? {
+            command::FrameOutcome::Rendered => {}
+            command::FrameOutcome::SwapchainOutOfDate => {
+                // Recreate next frame; `recreate` re-queries the surface for the true size, so the
+                // current extent is just a fallback hint.
+                let extent = self.swapchain.extent;
+                self.pending_resize = Some((extent.width, extent.height));
+            }
+        }
+        Ok(())
     }
 
     pub fn wait_idle(&self) -> Result<()> {

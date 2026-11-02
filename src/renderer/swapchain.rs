@@ -49,8 +49,7 @@ impl VulkanSwapchain {
 
     /// Recreate the swapchain + image views at `new_extent` (reusing the surface) after a resize.
     /// The caller must have waited for the device to be idle. Destroys the old image views + the
-    /// old swapchain. `#[allow(dead_code)]` comes off when `VulkanRenderer` drives it.
-    #[allow(dead_code)]
+    /// old swapchain.
     pub(crate) fn recreate(&mut self, device: &VulkanDevice, new_extent: (u32, u32)) -> Result<()> {
         let parts = Self::build_parts(
             &self.swapchain_loader,

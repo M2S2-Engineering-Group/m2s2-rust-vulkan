@@ -13,6 +13,13 @@ use ash::vk;
 
 pub const FRAMES_IN_FLIGHT: usize = 2;
 
+/// Result of one `draw_frame`: whether it rendered normally or the swapchain went out of date (the
+/// window resized) and the caller should recreate it.
+pub enum FrameOutcome {
+    Rendered,
+    SwapchainOutOfDate,
+}
+
 pub struct FrameContext {
     command_pool: vk::CommandPool,
     command_buffers: [vk::CommandBuffer; FRAMES_IN_FLIGHT],
@@ -98,13 +105,14 @@ impl FrameContext {
         swapchain: &VulkanSwapchain,
         vertex_buffer: &Buffer,
         index_buffer: &Buffer,
-    ) -> Result<()> {
+    ) -> Result<FrameOutcome> {
         let dev = &device.device;
         let frame = self.current_frame;
         let cmd = self.command_buffers[frame];
         let image_available = self.image_available_semaphores[frame];
         let render_finished = self.render_finished_semaphores[frame];
         let fence = self.in_flight_fences[frame];
+        let mut needs_recreate = false;
 
         // 1. Wait until this frame slot's previous submission has finished on the GPU.
         unsafe {
@@ -112,10 +120,11 @@ impl FrameContext {
                 .map_err(VulkanError::from)?;
         }
 
-        // 2. Acquire the next swapchain image. image_available is signaled when it's safe to
-        //    render into. Out-of-date = window resized: skip this frame (recreation is a later
-        //    spec) and return BEFORE resetting the fence (it must stay signaled, or step 1 next
-        //    time around deadlocks).
+        // 2. Acquire the next swapchain image. image_available is signaled when it's safe to render
+        //    into. Out-of-date = the swapchain no longer matches the window: skip this frame and
+        //    report it so the renderer recreates. Return BEFORE resetting the fence (it must stay
+        //    signaled, or step 1 next time around deadlocks). SUBOPTIMAL still renders but flags a
+        //    recreate.
         let image_index = match unsafe {
             swapchain.swapchain_loader.acquire_next_image(
                 swapchain.swapchain,
@@ -124,13 +133,11 @@ impl FrameContext {
                 vk::Fence::null(),
             )
         } {
-            Ok((index, _suboptimal)) => index,
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                log::warn!(
-                    "swapchain out of date on acquire; skipping frame (resize is a later spec)"
-                );
-                return Ok(());
+            Ok((index, suboptimal)) => {
+                needs_recreate |= suboptimal;
+                index
             }
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => return Ok(FrameOutcome::SwapchainOutOfDate),
             Err(e) => return Err(VulkanError::from(e)),
         };
 
@@ -167,7 +174,7 @@ impl FrameContext {
         }
 
         // 6. Present: wait on render_finished so the display engine doesn't show a half-drawn
-        //    image. Out-of-date/suboptimal = resize: log and carry on (see Non-goals).
+        //    image. Out-of-date/suboptimal flags a recreate (the renderer handles it next frame).
         let swapchains = [swapchain.swapchain];
         let image_indices = [image_index];
         let present_info = vk::PresentInfoKHR::default()
@@ -179,16 +186,21 @@ impl FrameContext {
                 .swapchain_loader
                 .queue_present(device.present_queue, &present_info)
         } {
-            Ok(_suboptimal) => {}
+            Ok(suboptimal) => needs_recreate |= suboptimal,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR) => {
-                log::warn!("swapchain out of date/suboptimal on present; continuing (resize is a later spec)");
+                needs_recreate = true;
             }
             Err(e) => return Err(VulkanError::from(e)),
         }
 
         // 7. Advance to the next frame-in-flight slot.
         self.current_frame = next_frame(frame);
-        Ok(())
+
+        Ok(if needs_recreate {
+            FrameOutcome::SwapchainOutOfDate
+        } else {
+            FrameOutcome::Rendered
+        })
     }
 
     /// Records the draw into `cmd` for the acquired `image_index`. With dynamic rendering there are
