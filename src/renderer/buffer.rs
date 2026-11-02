@@ -50,8 +50,7 @@ impl Vertex {
 
 /// A device-local GPU buffer whose contents were uploaded once via a staging buffer. Not `Drop`:
 /// freeing the allocation needs `&mut Allocator`, so call `destroy` explicitly before the
-/// `Allocator` is torn down (see specs/003). `#[allow(dead_code)]` comes off when `VulkanRenderer`
-/// owns these in the wiring step.
+/// `Allocator` is torn down (see specs/003).
 pub struct Buffer {
     pub(crate) buffer: vk::Buffer,
     allocation: Option<Allocation>,
@@ -61,7 +60,6 @@ pub struct Buffer {
 impl Buffer {
     /// Create a `DEVICE_LOCAL` buffer of `usage` and upload `data` into it via a transient
     /// host-visible staging buffer + a one-time `vkCmdCopyBuffer`.
-    #[allow(dead_code)]
     pub(crate) fn new_device_local<T: bytemuck::Pod>(
         device: &VulkanDevice,
         allocator: &mut Allocator,
@@ -109,14 +107,12 @@ impl Buffer {
     }
 
     /// Element count (vertices or indices), for `cmd_draw` / `cmd_draw_indexed`.
-    #[allow(dead_code)]
     pub(crate) fn len(&self) -> u32 {
         self.len
     }
 
     /// Destroy the buffer and return its allocation to the allocator. Must run before the
     /// `Allocator` is dropped.
-    #[allow(dead_code)]
     pub(crate) fn destroy(&mut self, device: &VulkanDevice, allocator: &mut Allocator) {
         unsafe { device.device.destroy_buffer(self.buffer, None) };
         if let Some(allocation) = self.allocation.take() {
@@ -126,7 +122,6 @@ impl Buffer {
 }
 
 /// Create a `VkBuffer`, allocate memory of `location` for it, and bind them.
-#[allow(dead_code)]
 fn create_buffer(
     device: &VulkanDevice,
     allocator: &mut Allocator,
@@ -164,7 +159,6 @@ fn create_buffer(
 
 /// Copy `size` bytes `src -> dst` via a one-time command buffer on the graphics queue, waiting on
 /// a fence for completion (startup-only; fine to block here).
-#[allow(dead_code)]
 fn copy_buffer(device: &VulkanDevice, src: vk::Buffer, dst: vk::Buffer, size: u64) -> Result<()> {
     let dev = &device.device;
     let pool_info = vk::CommandPoolCreateInfo::default()

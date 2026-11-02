@@ -4,6 +4,7 @@
 // straight port of vulkan-tutorial.com's render-pass-based version.
 
 use crate::error::{Result, VulkanError};
+use crate::renderer::buffer::Buffer;
 use crate::renderer::device::VulkanDevice;
 use crate::renderer::instance::VulkanInstance;
 use crate::renderer::pipeline::GraphicsPipeline;
@@ -95,6 +96,8 @@ impl FrameContext {
         device: &VulkanDevice,
         pipeline: &GraphicsPipeline,
         swapchain: &VulkanSwapchain,
+        vertex_buffer: &Buffer,
+        index_buffer: &Buffer,
     ) -> Result<()> {
         let dev = &device.device;
         let frame = self.current_frame;
@@ -137,7 +140,15 @@ impl FrameContext {
         }
 
         // 4. Record the command buffer.
-        self.record(dev, cmd, pipeline, swapchain, image_index)?;
+        self.record(
+            dev,
+            cmd,
+            pipeline,
+            swapchain,
+            image_index,
+            vertex_buffer,
+            index_buffer,
+        )?;
 
         // 5. Submit: wait on image_available at the color-write stage, signal render_finished,
         //    and signal `fence` on completion so step 1 can reclaim this slot next cycle.
@@ -182,6 +193,9 @@ impl FrameContext {
 
     /// Records the draw into `cmd` for the acquired `image_index`. With dynamic rendering there are
     /// no subpass dependencies, so the swapchain image's layout transitions are explicit barriers.
+    // Command recording genuinely needs all these handles; a mesh-bundle abstraction is a deferred
+    // non-goal (specs/003), so allow the arg count rather than introduce one just for clippy.
+    #[allow(clippy::too_many_arguments)]
     fn record(
         &self,
         dev: &ash::Device,
@@ -189,6 +203,8 @@ impl FrameContext {
         pipeline: &GraphicsPipeline,
         swapchain: &VulkanSwapchain,
         image_index: u32,
+        vertex_buffer: &Buffer,
+        index_buffer: &Buffer,
     ) -> Result<()> {
         let image = swapchain.images[image_index as usize];
         let image_view = swapchain.image_views[image_index as usize];
@@ -262,8 +278,10 @@ impl FrameContext {
             };
             dev.cmd_set_scissor(cmd, 0, &[scissor]);
 
-            // e. Draw the three hardcoded vertices.
-            dev.cmd_draw(cmd, 3, 1, 0, 0);
+            // e. Bind the vertex + index buffers and draw the indexed geometry.
+            dev.cmd_bind_vertex_buffers(cmd, 0, &[vertex_buffer.buffer], &[0]);
+            dev.cmd_bind_index_buffer(cmd, index_buffer.buffer, 0, vk::IndexType::UINT16);
+            dev.cmd_draw_indexed(cmd, index_buffer.len(), 1, 0, 0, 0);
 
             // f. End rendering.
             self.dynamic_rendering.cmd_end_rendering(cmd);

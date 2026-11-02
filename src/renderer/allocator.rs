@@ -28,14 +28,10 @@ impl Allocator {
         Ok(Self { inner })
     }
 
-    // #[allow(dead_code)]: consumed by `buffer.rs`'s `Buffer` in the next step; the attribute goes
-    // away once that lands.
-    #[allow(dead_code)]
     pub(crate) fn allocate(&mut self, desc: &AllocationCreateDesc) -> Result<Allocation> {
         self.inner.allocate(desc).map_err(VulkanError::from)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn free(&mut self, allocation: Allocation) -> Result<()> {
         self.inner.free(allocation).map_err(VulkanError::from)
     }
