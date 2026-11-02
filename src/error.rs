@@ -8,6 +8,7 @@ pub enum VulkanError {
     WindowError(String),
     InitializationError(String),
     ValidationError(String),
+    AllocationError(String),
     Other(String),
 }
 
@@ -18,6 +19,7 @@ impl fmt::Display for VulkanError {
             VulkanError::WindowError(msg) => write!(f, "Window error: {msg}"),
             VulkanError::InitializationError(msg) => write!(f, "Initialization error: {msg}"),
             VulkanError::ValidationError(msg) => write!(f, "Validation error: {msg}"),
+            VulkanError::AllocationError(msg) => write!(f, "Allocation error: {msg}"),
             VulkanError::Other(msg) => write!(f, "Error: {msg}"),
         }
     }
@@ -28,6 +30,12 @@ impl std::error::Error for VulkanError {}
 impl From<ash::vk::Result> for VulkanError {
     fn from(result: ash::vk::Result) -> Self {
         VulkanError::VulkanError(result)
+    }
+}
+
+impl From<gpu_allocator::AllocationError> for VulkanError {
+    fn from(error: gpu_allocator::AllocationError) -> Self {
+        VulkanError::AllocationError(error.to_string())
     }
 }
 

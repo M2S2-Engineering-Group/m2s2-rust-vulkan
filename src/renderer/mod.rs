@@ -1,3 +1,4 @@
+pub mod allocator;
 pub mod buffer;
 pub mod command;
 pub mod device;
