@@ -185,4 +185,30 @@ is a real "looks fine, is UB" trap, and a good one to have hit once deliberately
 
 ## Outcome
 
-_(Filled in after implementation.)_
+Implemented as specified, no material divergence from the plan:
+
+- **Shaders**: `shaders/triangle.{vert,frag}` compiled with `glslc` to committed `.spv`, loaded via
+  `include_bytes!` + `ash::util::read_spv`. (Recompile manually after editing the GLSL — the accepted
+  trade-off of precompiled SPIR-V.)
+- **`device.rs` prerequisite**: added a `const REQUIRED_DEVICE_EXTENSIONS: &[&CStr]` (swapchain +
+  dynamic_rendering) as the single source for both the enabled-extension list and the suitability check
+  (removing the duplicated hardcoded check), and chained `PhysicalDeviceDynamicRenderingFeatures` into
+  `DeviceCreateInfo` via `push_next`.
+- **Pipeline**: dynamic rendering via `PipelineRenderingCreateInfo.color_attachment_formats(&[color_format])`
+  pushed into `GraphicsPipelineCreateInfo` (no `.render_pass`); empty vertex input + layout; dynamic
+  viewport/scissor; `cull BACK` / `front_face CLOCKWISE`; shader modules destroyed immediately after
+  creation; `Drop` destroys pipeline then layout. Signature and `pub(crate)` fields match the spec's
+  Public API exactly. Not wired into `VulkanRenderer` (deferred to 002, per Non-goals).
+- **Tests**: both `.spv` parse via `read_spv` and start with the SPIR-V magic `0x07230203`.
+
+**Caveat on the manual-verification step.** The test plan assumed "validation layers on (default in debug
+builds)", but `instance.rs` currently has an empty `layer_names` — only a debug-utils *messenger* is set up,
+the `VK_LAYER_KHRONOS_validation` *layer* is not actually enabled. So the manual run (Apple M5 /
+`kosmickrisp` driver) confirms the pipeline **constructs and tears down cleanly with no errors, panics, or
+messenger output** — but it is not the full validation sweep the plan implied. Enabling the validation layer
+is an `instance.rs` concern affecting the whole renderer; it deserves its own small spec before "zero
+validation errors" can be a real acceptance gate. Flagged, not fixed here (out of this spec's scope).
+
+**Open question resolution.** The cloned-`ash::Device` ownership question is left as-is: `GraphicsPipeline`
+matches the existing `VulkanSwapchain` pattern (holds a cloned handle, relies on being dropped before the
+`VulkanDevice`). No `Arc<ash::Device>` introduced — revisit when 002 adds the next handle-owning struct.

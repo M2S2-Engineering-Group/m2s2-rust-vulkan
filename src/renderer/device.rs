@@ -2,6 +2,14 @@ use crate::error::{Result, VulkanError};
 use crate::renderer::instance::VulkanInstance;
 use ash::{vk, Device};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+use std::ffi::{c_char, CStr};
+
+/// Device extensions this engine requires of every physical device it selects and enables on the
+/// logical device. Single source of truth: `new` enables exactly this set and
+/// `supports_required_extensions` checks exactly this set, so the two can't drift apart.
+/// `VK_KHR_dynamic_rendering` is required by the pipeline (see specs/001-graphics-pipeline.md).
+const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] =
+    &[ash::khr::swapchain::NAME, ash::khr::dynamic_rendering::NAME];
 
 pub struct VulkanDevice {
     pub physical_device: vk::PhysicalDevice,
@@ -26,15 +34,12 @@ impl VulkanDevice {
         let (physical_device, queue_families) =
             Self::pick_physical_device(instance, &surface_loader, surface)?;
 
-        // TODO(spec 001): add `ash::khr::dynamic_rendering::NAME` to this list. Source: the
-        // extension's own page, https://registry.khronos.org/vulkan/specs/latest/man/html/VK_KHR_dynamic_rendering.html
-        // — read "Description" and "Issues" sections, skip the full function reference for now.
-        // Once there are two required extensions, `supports_required_extensions` below (currently
-        // hardcoded to check for just `VK_KHR_swapchain`) needs to check all of them — turn it into
-        // a `const REQUIRED_DEVICE_EXTENSIONS: &[&CStr]` array and `.all(...)` over it instead of a
-        // second bespoke `.any(...)` call next to the first (see specs/001-graphics-pipeline.md,
-        // "Decision: dynamic rendering over render pass objects").
-        let device_extensions = vec![ash::khr::swapchain::NAME.as_ptr()];
+        // Enable exactly the extensions we require, built from the same constant
+        // `supports_required_extensions` checks — one list, no drift.
+        let device_extensions: Vec<*const c_char> = REQUIRED_DEVICE_EXTENSIONS
+            .iter()
+            .map(|name| name.as_ptr())
+            .collect();
 
         let queue_priorities = [1.0];
         let mut queue_create_infos = vec![];
@@ -55,27 +60,18 @@ impl VulkanDevice {
 
         let device_features = vk::PhysicalDeviceFeatures::default();
 
-        // TODO(spec 001): declaring the extension above isn't enough on its own — the physical
-        // device feature also has to be explicitly opted into, via `.push_next(...)` on
-        // `DeviceCreateInfo` below. Source: docs.rs/ash `vk::PhysicalDeviceDynamicRenderingFeatures`
-        // (search "dynamic_rendering" on docs.rs/ash/latest/ash/vk) for the builder method name,
-        // and https://docs.vulkan.org/samples/latest/samples/extensions/dynamic_rendering/README.html
-        // (already linked from LEARNING_PATH.md) for a worked example of the whole device-creation
-        // shape, not just this one struct.
-        //
-        //     let mut dynamic_rendering_features =
-        //         vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
-        //     let device_create_info = vk::DeviceCreateInfo::default()
-        //         .push_next(&mut dynamic_rendering_features)
-        //         ...
-        //
-        // `mut` matters here (`push_next` takes `&mut`) and the pushed struct must outlive the
-        // `create_device` call below it — keep it as a local `let` in this function, don't drop it
-        // early.
+        // Dynamic rendering is an opt-in device *feature*, not just an extension: enabling the
+        // extension exposes the entry points, but the feature itself must be turned on via
+        // push_next on DeviceCreateInfo. `dynamic_rendering_features` is a mutable local that must
+        // outlive the create_device call below (push_next stores a pointer into it).
+        let mut dynamic_rendering_features =
+            vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
+
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&device_extensions)
-            .enabled_features(&device_features);
+            .enabled_features(&device_features)
+            .push_next(&mut dynamic_rendering_features);
 
         let device = unsafe {
             instance
@@ -178,14 +174,7 @@ impl VulkanDevice {
         }
     }
 
-    // TODO(spec 001): once `device_extensions` above lists both VK_KHR_swapchain and
-    // VK_KHR_dynamic_rendering, this needs to check both are present, not just swapchain.
-    // Introduce `const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[ash::khr::swapchain::NAME,
-    // ash::khr::dynamic_rendering::NAME];` near the top of this file and change the `.any(...)`
-    // below to `REQUIRED_DEVICE_EXTENSIONS.iter().all(|required| available_extensions.iter().any(...))`.
-    // This also removes the duplication between this list and the `device_extensions` vec built in
-    // `new()` above — build `device_extensions` from the same constant instead of listing the name
-    // twice.
+    /// True only if `physical_device` exposes every extension in `REQUIRED_DEVICE_EXTENSIONS`.
     fn supports_required_extensions(
         instance: &VulkanInstance,
         physical_device: vk::PhysicalDevice,
@@ -197,9 +186,11 @@ impl VulkanDevice {
                 .map_err(VulkanError::from)?
         };
 
-        Ok(available_extensions
-            .iter()
-            .any(|extension| extension.extension_name_as_c_str() == Ok(ash::khr::swapchain::NAME)))
+        Ok(REQUIRED_DEVICE_EXTENSIONS.iter().all(|required| {
+            available_extensions
+                .iter()
+                .any(|extension| extension.extension_name_as_c_str() == Ok(*required))
+        }))
     }
 
     fn has_adequate_swapchain_support(

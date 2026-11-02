@@ -22,28 +22,28 @@ on to Phase 1.
 The minimum an engine needs to put anything on screen at all. This is what `pipeline.rs`, `buffer.rs`, and
 `command.rs` are stubbed out for.
 
-- [ ] **Shader pipeline**: GLSL compiled offline to SPIR-V via `glslc`, committed to `shaders/*.spv`, loaded
+- [x] **Shader pipeline**: GLSL compiled offline to SPIR-V via `glslc`, committed to `shaders/*.spv`, loaded
       via `include_bytes!` + `ash::util::read_spv` — see
       [specs/001-graphics-pipeline.md](specs/001-graphics-pipeline.md) for why build-time `shaderc`
       compilation was passed over for now
-- [ ] **Graphics pipeline object**: vertex input, input assembly, viewport/scissor, rasterization state,
+- [x] **Graphics pipeline object**: vertex input, input assembly, viewport/scissor, rasterization state,
       color blend state
-- [ ] **Render target strategy**: dynamic rendering (`VK_KHR_dynamic_rendering`, core in Vulkan 1.3) vs.
+- [x] **Render target strategy**: dynamic rendering (`VK_KHR_dynamic_rendering`, core in Vulkan 1.3) vs.
       classic render pass + framebuffer objects — **decide this before writing `pipeline.rs`**, not after.
       Dynamic rendering avoids framebuffer-object bookkeeping and composes far better with the multi-pass
       work in Phase 4 (shadow maps, deferred shading, post-processing all become "render into a different
       set of attachments," not "build another framebuffer graph"). Retrofitting this later means rewriting
       `pipeline.rs` and every draw call.
-- [ ] **Command pool & buffers**: recorded per-frame; structure recording so it can later be split per
+- [x] **Command pool & buffers**: recorded per-frame; structure recording so it can later be split per
       render pass (Phase 4 multi-threading) instead of one monolithic record function
-- [ ] **Synchronization**: semaphores (image-available, render-finished), fences (frame-in-flight), a named
+- [x] **Synchronization**: semaphores (image-available, render-finished), fences (frame-in-flight), a named
       `FRAMES_IN_FLIGHT` constant rather than a hardcoded `2` scattered through the code
 - [ ] **Memory allocation strategy**: adopt `gpu-allocator` now rather than raw `vkAllocateMemory` per
       buffer/image — this is a foundational decision `buffer.rs` and later texture support both build on;
       switching allocators after buffer/image code exists is a rewrite, not an addition
 - [ ] **Vertex & index buffers**: staging buffer → device-local transfer pattern
 - [ ] **Swapchain recreation** on resize (the `triangle.rs` resize handler is currently a `TODO`)
-- [ ] **First triangle** rendered end-to-end
+- [x] **First triangle** rendered end-to-end
 
 **Milestone**: hardcoded triangle renders and survives a window resize.
 

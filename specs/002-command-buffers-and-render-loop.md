@@ -168,4 +168,34 @@ chain: `frame_context → pipeline → swapchain → device → instance`.
 
 ## Outcome
 
-_(Filled in after implementation.)_
+Implemented and verified — **the hardcoded triangle renders** (red vertex at top, per Vulkan's Y-down
+clip space) on a dark-blue clear, and the window closes with a clean shutdown (`Destroying Vulkan
+renderer`, no validation errors), exercising the new four-deep `ManuallyDrop` teardown chain
+(`frame_context → pipeline → swapchain → device → instance`).
+
+What matched the spec: the full wait/acquire/record/submit/present protocol, `FRAMES_IN_FLIGHT = 2`,
+signaled-at-creation fences, the two explicit layout barriers (`UNDEFINED → COLOR_ATTACHMENT_OPTIMAL →
+PRESENT_SRC_KHR`) that dynamic rendering requires, and the reset-fence-only-after-acquire ordering.
+
+**Deviation from the Public API (allowed small tweak).** `FrameContext::new` takes `&VulkanInstance` in
+addition to `&VulkanDevice`, and the struct holds an `ash::khr::dynamic_rendering::Device` loader.
+`vkCmdBeginRendering`/`vkCmdEndRendering` are invoked through that KHR extension loader rather than
+`ash::Device`'s core (Vulkan 1.3) methods, because spec 001 deliberately enabled the *extension* on a
+1.0 instance — the core function pointers can be null on an extension-only driver. The loader needs the
+instance to resolve its device-level entry points, hence the extra parameter. `mod.rs` passes `&instance`
+accordingly.
+
+**Open question resolved.** `GraphicsPipeline`'s fields stayed `pub(crate)` (as left by spec 001);
+`command.rs` reads `pipeline.pipeline` directly, no accessor methods added — consistent with the
+cross-module-within-crate access this needed.
+
+**Known limitations (unchanged / deliberate).**
+- Window resize is logged and skipped (`ERROR_OUT_OF_DATE_KHR`/`SUBOPTIMAL_KHR`), not handled — swapchain
+  recreation is a later roadmap item. The initial HiDPI resize event was harmless here.
+- `render_finished` semaphores are per-frame-in-flight rather than per-swapchain-image (the tutorial's
+  known edge case), per Non-goals.
+- Validation layers are still not actually enabled (`instance.rs` has an empty `layer_names`), so "no
+  validation errors" is only as strong as the debug messenger — which stayed silent. Still worth a
+  dedicated spec to turn the real `VK_LAYER_KHRONOS_validation` on (carried over from spec 001's Outcome).
+- `FrameContext::new` leaks the partial set of sync objects if creation fails mid-loop (near-impossible
+  path; matches the stub's simplicity). Worth tidying alongside the pipeline's similar error-path note.
