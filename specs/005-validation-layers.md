@@ -109,4 +109,23 @@ Mostly internal:
 
 ## Outcome
 
-_(Filled in after implementation.)_
+Implemented and verified — **validation enabled and the engine runs clean**: confirmed active in the log
+(loader inserts `VK_LAYER_KHRONOS_validation` at instance + device level), with **zero validation
+errors/warnings** through render, resize-recreate, and **graceful teardown** on an Apple M5 / `kosmickrisp`
+driver. The whole engine (specs 001–004) is now actually validated, not just assumed.
+
+Enable path: debug-only, availability-gated (`enumerate_instance_layer_properties`; warn-and-skip if absent, so
+CI/SDK-less builds are fine), plus a `p_next` messenger for create/destroy-instance messages.
+
+Validation flagged **three** issues, all fixed:
+1. **`VK_KHR_dynamic_rendering` missing prerequisites** (a surprise beyond the two known debts): on a 1.0-API
+   instance it needs `VK_KHR_get_physical_device_properties2` (instance) + the `depth_stencil_resolve →
+   create_renderpass2 → {multiview, maintenance2}` device chain. Added them. *(This is the real cost of spec
+   001's "extension on a 1.0 instance" choice; bumping the API version to 1.2/1.3 would drop this dependency
+   tail — a possible future 001 simplification, not done here.)*
+2. **Per-frame `render_finished` semaphore reuse** (the predicted 002 debt — and it *did* trigger on
+   kosmickrisp): made `render_finished` one per swapchain image, recreated on swapchain recreate.
+3. **Shutdown image-view leak** (the 004 find): `VulkanSwapchain` now holds a cloned `ash::Device` and destroys
+   its image views in `Drop`.
+
+No further errors surfaced beyond these three; the example is clean across all exercised paths.
