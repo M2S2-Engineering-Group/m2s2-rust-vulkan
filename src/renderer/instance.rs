@@ -27,7 +27,11 @@ impl VulkanInstance {
             .engine_version(vk::make_api_version(0, 1, 0, 0))
             .api_version(vk::API_VERSION_1_0);
 
-        let mut extension_names = vec![ash::khr::surface::NAME.as_ptr()];
+        let mut extension_names = vec![
+            ash::khr::surface::NAME.as_ptr(),
+            // Required by the device's VK_KHR_dynamic_rendering on a 1.0-API instance.
+            ash::khr::get_physical_device_properties2::NAME.as_ptr(),
+        ];
 
         // Platform-specific surface extensions
         #[cfg(target_os = "windows")]

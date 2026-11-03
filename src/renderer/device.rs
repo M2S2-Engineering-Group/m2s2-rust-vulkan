@@ -8,8 +8,16 @@ use std::ffi::{c_char, CStr};
 /// logical device. Single source of truth: `new` enables exactly this set and
 /// `supports_required_extensions` checks exactly this set, so the two can't drift apart.
 /// `VK_KHR_dynamic_rendering` is required by the pipeline (see specs/001-graphics-pipeline.md).
-const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] =
-    &[ash::khr::swapchain::NAME, ash::khr::dynamic_rendering::NAME];
+const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[
+    ash::khr::swapchain::NAME,
+    ash::khr::dynamic_rendering::NAME,
+    // Dependency chain VK_KHR_dynamic_rendering pulls in on a pre-1.2 API: depth_stencil_resolve ->
+    // create_renderpass2 -> {multiview, maintenance2}. Required explicitly on our 1.0-API instance.
+    ash::khr::depth_stencil_resolve::NAME,
+    ash::khr::create_renderpass2::NAME,
+    ash::khr::multiview::NAME,
+    ash::khr::maintenance2::NAME,
+];
 
 pub struct VulkanDevice {
     pub physical_device: vk::PhysicalDevice,
