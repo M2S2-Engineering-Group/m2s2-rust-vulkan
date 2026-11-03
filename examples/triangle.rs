@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..
             } => {
                 log::info!("Window resized to: {physical_size:?}");
-                // TODO: Handle swapchain recreation
+                renderer.resize((physical_size.width, physical_size.height));
             }
             Event::AboutToWait => {
                 if let Err(e) = renderer.render_frame() {
