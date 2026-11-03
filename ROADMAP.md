@@ -38,10 +38,10 @@ The minimum an engine needs to put anything on screen at all. This is what `pipe
       render pass (Phase 4 multi-threading) instead of one monolithic record function
 - [x] **Synchronization**: semaphores (image-available, render-finished), fences (frame-in-flight), a named
       `FRAMES_IN_FLIGHT` constant rather than a hardcoded `2` scattered through the code
-- [ ] **Memory allocation strategy**: adopt `gpu-allocator` now rather than raw `vkAllocateMemory` per
+- [x] **Memory allocation strategy**: adopt `gpu-allocator` now rather than raw `vkAllocateMemory` per
       buffer/image — this is a foundational decision `buffer.rs` and later texture support both build on;
       switching allocators after buffer/image code exists is a rewrite, not an addition
-- [ ] **Vertex & index buffers**: staging buffer → device-local transfer pattern
+- [x] **Vertex & index buffers**: staging buffer → device-local transfer pattern
 - [ ] **Swapchain recreation** on resize (the `triangle.rs` resize handler is currently a `TODO`)
 - [x] **First triangle** rendered end-to-end
 

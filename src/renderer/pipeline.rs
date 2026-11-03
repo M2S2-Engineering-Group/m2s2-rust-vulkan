@@ -3,6 +3,7 @@
 // `extent` parameter).
 
 use crate::error::{Result, VulkanError};
+use crate::renderer::buffer::Vertex;
 use crate::renderer::device::VulkanDevice;
 use ash::vk;
 use std::io::Cursor;
@@ -49,8 +50,13 @@ impl GraphicsPipeline {
                 .name(entry_name),
         ];
 
-        // Empty vertex input: positions are hardcoded in the vertex shader via gl_VertexIndex.
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+        // Vertex input: one per-vertex binding + the position/color attributes, from the Vertex
+        // type (buffer.rs). Must stay alive until create_graphics_pipelines reads through it below.
+        let binding_descriptions = [Vertex::binding_description()];
+        let attribute_descriptions = Vertex::attribute_descriptions();
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&binding_descriptions)
+            .vertex_attribute_descriptions(&attribute_descriptions);
 
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)

@@ -1,4 +1,5 @@
-use m2s2_rust_vulkan::{init_logging, VulkanRenderer};
+use m2s2_rust_vulkan::math::Vec3;
+use m2s2_rust_vulkan::{init_logging, Index, Vertex, VulkanRenderer};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -16,10 +17,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("Initializing Vulkan renderer...");
     let size = window.inner_size();
+
+    // Geometry lives in the consumer, not the library: a quad (two triangles) with a distinct
+    // color per corner. Positions are in Vulkan clip space (Y points down); the index winding
+    // matches the pipeline's clockwise front face + back-face culling.
+    let vertices = [
+        Vertex {
+            position: Vec3::new(-0.5, -0.5, 0.0),
+            color: Vec3::new(1.0, 0.0, 0.0),
+        },
+        Vertex {
+            position: Vec3::new(0.5, -0.5, 0.0),
+            color: Vec3::new(0.0, 1.0, 0.0),
+        },
+        Vertex {
+            position: Vec3::new(0.5, 0.5, 0.0),
+            color: Vec3::new(0.0, 0.0, 1.0),
+        },
+        Vertex {
+            position: Vec3::new(-0.5, 0.5, 0.0),
+            color: Vec3::new(1.0, 1.0, 0.0),
+        },
+    ];
+    let indices: [Index; 6] = [0, 1, 2, 2, 3, 0];
+
     let mut renderer = VulkanRenderer::new(
         window.display_handle()?.as_raw(),
         window.window_handle()?.as_raw(),
         (size.width, size.height),
+        &vertices,
+        &indices,
     )?;
 
     log::info!("Starting render loop...");
