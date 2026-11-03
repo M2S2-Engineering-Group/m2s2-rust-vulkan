@@ -24,7 +24,11 @@ pub struct FrameContext {
     command_pool: vk::CommandPool,
     command_buffers: [vk::CommandBuffer; FRAMES_IN_FLIGHT],
     image_available_semaphores: [vk::Semaphore; FRAMES_IN_FLIGHT],
-    render_finished_semaphores: [vk::Semaphore; FRAMES_IN_FLIGHT],
+    // One render-finished semaphore PER SWAPCHAIN IMAGE (not per frame-in-flight): present waits on
+    // it with no fence to report when it's consumed, so a per-frame semaphore could be reused while
+    // a prior present still references it (validation flags this). Indexed by acquired image index;
+    // recreated when the image count changes on swapchain recreate.
+    render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: [vk::Fence; FRAMES_IN_FLIGHT],
     current_frame: usize,
     // vkCmdBeginRendering/EndRendering are reached through the KHR extension loader, not
@@ -37,7 +41,11 @@ pub struct FrameContext {
 }
 
 impl FrameContext {
-    pub fn new(instance: &VulkanInstance, device: &VulkanDevice) -> Result<Self> {
+    pub fn new(
+        instance: &VulkanInstance,
+        device: &VulkanDevice,
+        image_count: usize,
+    ) -> Result<Self> {
         let dev = &device.device;
 
         let pool_info = vk::CommandPoolCreateInfo::default()
@@ -66,14 +74,10 @@ impl FrameContext {
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
 
         let mut image_available_semaphores = [vk::Semaphore::null(); FRAMES_IN_FLIGHT];
-        let mut render_finished_semaphores = [vk::Semaphore::null(); FRAMES_IN_FLIGHT];
         let mut in_flight_fences = [vk::Fence::null(); FRAMES_IN_FLIGHT];
         for i in 0..FRAMES_IN_FLIGHT {
             unsafe {
                 image_available_semaphores[i] = dev
-                    .create_semaphore(&semaphore_info, None)
-                    .map_err(VulkanError::from)?;
-                render_finished_semaphores[i] = dev
                     .create_semaphore(&semaphore_info, None)
                     .map_err(VulkanError::from)?;
                 in_flight_fences[i] = dev
@@ -81,6 +85,8 @@ impl FrameContext {
                     .map_err(VulkanError::from)?;
             }
         }
+        // render-finished is per swapchain image (see the field comment).
+        let render_finished_semaphores = Self::create_present_semaphores(dev, image_count)?;
 
         let dynamic_rendering = ash::khr::dynamic_rendering::Device::new(&instance.instance, dev);
 
@@ -94,6 +100,30 @@ impl FrameContext {
             dynamic_rendering,
             device: dev.clone(),
         })
+    }
+
+    fn create_present_semaphores(dev: &ash::Device, count: usize) -> Result<Vec<vk::Semaphore>> {
+        let info = vk::SemaphoreCreateInfo::default();
+        (0..count)
+            .map(|_| unsafe { dev.create_semaphore(&info, None).map_err(VulkanError::from) })
+            .collect()
+    }
+
+    /// Recreate the per-swapchain-image render-finished semaphores — the image count can change on a
+    /// swapchain recreate. The caller must have waited for the device to be idle.
+    pub(crate) fn recreate_present_semaphores(
+        &mut self,
+        device: &VulkanDevice,
+        image_count: usize,
+    ) -> Result<()> {
+        unsafe {
+            for &semaphore in &self.render_finished_semaphores {
+                device.device.destroy_semaphore(semaphore, None);
+            }
+        }
+        self.render_finished_semaphores =
+            Self::create_present_semaphores(&device.device, image_count)?;
+        Ok(())
     }
 
     /// Runs one full frame against `swapchain`, using `pipeline` to draw. See
@@ -110,7 +140,6 @@ impl FrameContext {
         let frame = self.current_frame;
         let cmd = self.command_buffers[frame];
         let image_available = self.image_available_semaphores[frame];
-        let render_finished = self.render_finished_semaphores[frame];
         let fence = self.in_flight_fences[frame];
         let mut needs_recreate = false;
 
@@ -140,6 +169,8 @@ impl FrameContext {
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => return Ok(FrameOutcome::SwapchainOutOfDate),
             Err(e) => return Err(VulkanError::from(e)),
         };
+        // render-finished is per image (see field comment), indexed by the acquired image.
+        let render_finished = self.render_finished_semaphores[image_index as usize];
 
         // 3. Only now that we're committed to submitting, unsignal the fence.
         unsafe {
