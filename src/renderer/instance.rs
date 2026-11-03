@@ -3,6 +3,9 @@ use ash::{vk, Entry, Instance};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::ffi::CStr;
 
+#[cfg(debug_assertions)]
+const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
+
 pub struct VulkanInstance {
     pub entry: Entry,
     pub instance: Instance,
@@ -39,17 +42,34 @@ impl VulkanInstance {
         #[cfg(target_os = "linux")]
         extension_names.push(ash::khr::wayland_surface::NAME.as_ptr());
 
-        let layer_names = vec![];
+        #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+        let mut layer_names = vec![];
 
         #[cfg(debug_assertions)]
         {
             extension_names.push(ash::ext::debug_utils::NAME.as_ptr());
+            // Enabling an absent layer fails create_instance, so gate on availability (CI and
+            // SDK-less machines have no validation layer).
+            if Self::validation_layer_available(&entry) {
+                layer_names.push(VALIDATION_LAYER.as_ptr());
+                log::info!("Vulkan validation layer enabled");
+            } else {
+                log::warn!("VK_LAYER_KHRONOS_validation not available; running without validation");
+            }
         }
+
+        // In debug builds, also chain a messenger into p_next so validation messages emitted
+        // *during* create_instance / destroy_instance are caught (the persistent messenger below
+        // only covers the window in between).
+        #[cfg(debug_assertions)]
+        let mut debug_create_info = Self::debug_messenger_create_info();
 
         let create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_extension_names(&extension_names)
             .enabled_layer_names(&layer_names);
+        #[cfg(debug_assertions)]
+        let create_info = create_info.push_next(&mut debug_create_info);
 
         let instance =
             unsafe { entry.create_instance(&create_info, None) }.map_err(VulkanError::from)?;
@@ -87,13 +107,16 @@ impl VulkanInstance {
     }
 
     #[cfg(debug_assertions)]
-    fn setup_debug_messenger(
-        entry: &Entry,
-        instance: &Instance,
-    ) -> Result<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)> {
-        let debug_utils = ash::ext::debug_utils::Instance::new(entry, instance);
+    fn validation_layer_available(entry: &Entry) -> bool {
+        unsafe { entry.enumerate_instance_layer_properties() }
+            .unwrap_or_default()
+            .iter()
+            .any(|layer| layer.layer_name_as_c_str() == Ok(VALIDATION_LAYER))
+    }
 
-        let create_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+    #[cfg(debug_assertions)]
+    fn debug_messenger_create_info<'a>() -> vk::DebugUtilsMessengerCreateInfoEXT<'a> {
+        vk::DebugUtilsMessengerCreateInfoEXT::default()
             .message_severity(
                 vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
                     | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
@@ -104,8 +127,16 @@ impl VulkanInstance {
                     | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
                     | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
             )
-            .pfn_user_callback(Some(debug_callback));
+            .pfn_user_callback(Some(debug_callback))
+    }
 
+    #[cfg(debug_assertions)]
+    fn setup_debug_messenger(
+        entry: &Entry,
+        instance: &Instance,
+    ) -> Result<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)> {
+        let debug_utils = ash::ext::debug_utils::Instance::new(entry, instance);
+        let create_info = Self::debug_messenger_create_info();
         let debug_messenger = unsafe {
             debug_utils
                 .create_debug_utils_messenger(&create_info, None)
