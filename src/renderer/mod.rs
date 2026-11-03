@@ -77,7 +77,7 @@ impl VulkanRenderer {
         let pipeline = pipeline::GraphicsPipeline::new(&device, swapchain.format)?;
         // FrameContext::new also takes &instance to build the VK_KHR_dynamic_rendering loader
         // (see command.rs) -- a small tweak from spec 002's `new(&device)`.
-        let frame_context = command::FrameContext::new(&instance, &device)?;
+        let frame_context = command::FrameContext::new(&instance, &device, swapchain.images.len())?;
 
         Ok(Self {
             instance: ManuallyDrop::new(instance),
@@ -107,6 +107,11 @@ impl VulkanRenderer {
             }
             self.wait_idle()?;
             self.swapchain.recreate(&self.device, (width, height))?;
+            // The image count can change on recreate; rebuild the per-image render-finished
+            // semaphores to match (device is idle from wait_idle above).
+            let image_count = self.swapchain.images.len();
+            self.frame_context
+                .recreate_present_semaphores(&self.device, image_count)?;
             self.pending_resize = None;
         }
 

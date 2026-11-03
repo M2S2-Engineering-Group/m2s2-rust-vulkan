@@ -12,6 +12,7 @@ pub struct VulkanSwapchain {
     pub extent: vk::Extent2D,
     surface_loader: ash::khr::surface::Instance,
     surface: vk::SurfaceKHR,
+    device: ash::Device, // cloned handle, so Drop can destroy the image views
 }
 
 impl VulkanSwapchain {
@@ -44,6 +45,7 @@ impl VulkanSwapchain {
             extent: parts.extent,
             surface_loader,
             surface,
+            device: device.device.clone(),
         })
     }
 
@@ -267,11 +269,12 @@ struct SwapchainParts {
 
 impl Drop for VulkanSwapchain {
     fn drop(&mut self) {
-        // Note: image_views need to be destroyed by the device that owns them
-        // This will be handled by the renderer cleanup
         unsafe {
-            // The swapchain must be destroyed before the surface it was created from
-            // (VUID-vkDestroySurfaceKHR-surface-01266).
+            // Image views first (they view the swapchain images), then the swapchain, then the
+            // surface it was created from (VUID-vkDestroySurfaceKHR-surface-01266).
+            for &view in &self.image_views {
+                self.device.destroy_image_view(view, None);
+            }
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
