@@ -51,10 +51,10 @@ The minimum an engine needs to put anything on screen at all. This is what `pipe
 
 What separates "a triangle renders" from "a usable rendering engine" for simple 3D scenes.
 
-- [ ] **Depth buffer** and depth testing
-- [ ] **Uniform buffers & descriptor sets**: per-frame MVP matrices via `m2s2-math`
+- [x] **Depth buffer** and depth testing — see [specs/006-uniforms-depth-camera.md](specs/006-uniforms-depth-camera.md)
+- [x] **Uniform buffers & descriptor sets**: per-frame MVP matrices via `m2s2-math` — see [specs/006](specs/006-uniforms-depth-camera.md)
 - [ ] **Push constants** for small, frequently-updated per-draw data
-- [ ] **Camera**: view/projection using `src/math.rs`'s existing `perspective`/`look_at`
+- [x] **Camera**: view/projection using `src/math.rs`'s existing `perspective`/`look_at` — see [specs/006](specs/006-uniforms-depth-camera.md)
 - [ ] **Textures**: image loading, `VkImage`/`VkImageView` creation, layout transitions, samplers, mipmaps
 - [ ] **Multiple draw calls / basic instancing**: more than one object per frame without one pipeline per
       object

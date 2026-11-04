@@ -22,9 +22,17 @@ pub struct GraphicsPipeline {
 }
 
 impl GraphicsPipeline {
-    /// `color_format` should be the swapchain's format (`VulkanSwapchain::format`). No `extent`
-    /// parameter: viewport and scissor are dynamic state, set per-frame in `command.rs` (spec 002).
-    pub fn new(device: &VulkanDevice, color_format: vk::Format) -> Result<Self> {
+    /// `color_format` should be the swapchain's format (`VulkanSwapchain::format`); `depth_format`
+    /// the depth attachment's (`DepthResources::format`). `descriptor_set_layout` is the per-frame
+    /// MVP uniform layout from `uniform.rs`, referenced by the pipeline layout so the shader can read
+    /// `set = 0`. No `extent` parameter: viewport and scissor are dynamic state, set per-frame in
+    /// `command.rs` (spec 002).
+    pub fn new(
+        device: &VulkanDevice,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+        descriptor_set_layout: vk::DescriptorSetLayout,
+    ) -> Result<Self> {
         let device = &device.device;
 
         // include_bytes! gives &[u8] with no alignment guarantee; VkShaderModuleCreateInfo wants
@@ -74,12 +82,24 @@ impl GraphicsPipeline {
         let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(vk::CullModeFlags::BACK)
-            .front_face(vk::FrontFace::CLOCKWISE)
+            // COUNTER_CLOCKWISE: the perspective Y-flip (see math::perspective) inverts screen-space
+            // winding, so standard CCW-outward geometry is front-facing under this setting. (Spec 006
+            // changed this from CLOCKWISE, which suited the pre-projection clip-space quad.)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .line_width(1.0);
 
         let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1)
             .sample_shading_enable(false);
+
+        // Depth test enabled: fragments nearer the camera (smaller depth, LESS) win and write their
+        // depth back. Required for the cube's far faces to be occluded by its near ones (spec 006).
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false);
 
         let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
             .blend_enable(false)
@@ -87,18 +107,21 @@ impl GraphicsPipeline {
         let color_blending =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
 
-        // Empty layout: no descriptor sets, no push constants until Phase 2.
+        // One descriptor set (set = 0): the per-frame MVP uniform block (spec 006).
+        let set_layouts = [descriptor_set_layout];
+        let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
         let pipeline_layout = unsafe {
             device
-                .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default(), None)
+                .create_pipeline_layout(&layout_info, None)
                 .map_err(VulkanError::from)?
         };
 
-        // Dynamic rendering: the pipeline declares the color-attachment *format* it targets via
-        // push_next, instead of being bound to a VkRenderPass + subpass. No .render_pass(...) call.
+        // Dynamic rendering: the pipeline declares the color + depth attachment *formats* it targets
+        // via push_next, instead of being bound to a VkRenderPass + subpass. No .render_pass(...).
         let color_formats = [color_format];
-        let mut rendering_info =
-            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&color_formats);
+        let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&color_formats)
+            .depth_attachment_format(depth_format);
 
         let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
@@ -107,6 +130,7 @@ impl GraphicsPipeline {
             .viewport_state(&viewport_state)
             .rasterization_state(&rasterizer)
             .multisample_state(&multisampling)
+            .depth_stencil_state(&depth_stencil)
             .color_blend_state(&color_blending)
             .dynamic_state(&dynamic_state)
             .layout(pipeline_layout)

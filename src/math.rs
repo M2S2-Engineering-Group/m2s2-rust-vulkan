@@ -16,9 +16,16 @@ pub fn to_radians(degrees: f32) -> f32 {
     degrees * std::f32::consts::PI / 180.0
 }
 
-/// Create a perspective projection matrix (right-handed, Z in [0, 1] — Vulkan convention)
+/// Create a perspective projection matrix (right-handed, Z in [0, 1] — Vulkan convention).
+///
+/// `perspective_rh_zo` gives the [0,1] depth Vulkan wants but an OpenGL-style Y (up). Vulkan's clip
+/// space has +Y pointing *down*, so the Y scale is negated here — otherwise rendered content is
+/// vertically mirrored. This keeps the Vulkan convention in this layer rather than every caller.
 pub fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
-    Mat4::perspective_rh_zo(fov_y, aspect, near, far)
+    let mut m = Mat4::perspective_rh_zo(fov_y, aspect, near, far);
+    let y = m.get(1, 1).expect("4x4 matrix has element (1,1)");
+    m.set(1, 1, -y);
+    m
 }
 
 /// Create a look-at view matrix (right-handed — Vulkan convention)

@@ -1,12 +1,15 @@
 pub mod allocator;
 pub mod buffer;
 pub mod command;
+pub mod depth;
 pub mod device;
 pub mod instance;
 pub mod pipeline;
 pub mod swapchain;
+pub mod uniform;
 
 use crate::error::{Result, VulkanError};
+use crate::math::Mat4;
 use ash::vk;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::mem::ManuallyDrop;
@@ -30,6 +33,12 @@ pub struct VulkanRenderer {
     // the device).
     pub vertex_buffer: buffer::Buffer,
     pub index_buffer: buffer::Buffer,
+    // Per-frame MVP uniforms + descriptor sets, and the depth attachment. Like the buffers (and for
+    // the same reason — freeing their allocations needs `&mut Allocator`), these are NOT
+    // `ManuallyDrop`; they're torn down via explicit `destroy` in `Drop`, before the allocator.
+    // `depth` is also recreated on resize (it's swapchain-extent-sized); `uniforms` is not.
+    pub(crate) uniforms: uniform::Uniforms,
+    pub(crate) depth: depth::DepthResources,
     pub allocator: ManuallyDrop<allocator::Allocator>,
     // A pending resize target in physical pixels; the next `render_frame` recreates the swapchain to
     // it. Set by `resize` and by an out-of-date frame. `None` = nothing pending.
@@ -74,7 +83,25 @@ impl VulkanRenderer {
             vk::BufferUsageFlags::INDEX_BUFFER,
         )?;
 
-        let pipeline = pipeline::GraphicsPipeline::new(&device, swapchain.format)?;
+        // Depth attachment (swapchain-sized) and per-frame MVP uniforms. The uniforms' descriptor-set
+        // layout must exist before the pipeline, which references it in its pipeline layout.
+        let depth = depth::DepthResources::new(
+            &instance,
+            &device,
+            &mut allocator,
+            vk::Extent2D {
+                width: window_extent.0,
+                height: window_extent.1,
+            },
+        )?;
+        let uniforms = uniform::Uniforms::new(&device, &mut allocator)?;
+
+        let pipeline = pipeline::GraphicsPipeline::new(
+            &device,
+            swapchain.format,
+            depth.format(),
+            uniforms.descriptor_set_layout(),
+        )?;
         // FrameContext::new also takes &instance to build the VK_KHR_dynamic_rendering loader
         // (see command.rs) -- a small tweak from spec 002's `new(&device)`.
         let frame_context = command::FrameContext::new(&instance, &device, swapchain.images.len())?;
@@ -87,6 +114,8 @@ impl VulkanRenderer {
             frame_context: ManuallyDrop::new(frame_context),
             vertex_buffer,
             index_buffer,
+            uniforms,
+            depth,
             allocator: ManuallyDrop::new(allocator),
             pending_resize: None,
         })
@@ -99,7 +128,11 @@ impl VulkanRenderer {
         self.pending_resize = Some(new_extent);
     }
 
-    pub fn render_frame(&mut self) -> Result<()> {
+    /// Draw one frame of the caller-supplied geometry under the given transform. `model` is the
+    /// object's world-space transform (what the caller's simulation produces), `view`/`proj` the
+    /// camera — the renderer combines them as `proj * view * model` in the vertex shader. See
+    /// specs/006 and [[update/render separation]].
+    pub fn render_frame(&mut self, model: Mat4, view: Mat4, proj: Mat4) -> Result<()> {
         if let Some((width, height)) = self.pending_resize {
             if width == 0 || height == 0 {
                 // Minimized: can't build a swapchain. Keep the pending size and skip drawing.
@@ -112,15 +145,28 @@ impl VulkanRenderer {
             let image_count = self.swapchain.images.len();
             self.frame_context
                 .recreate_present_semaphores(&self.device, image_count)?;
+            // The depth attachment is swapchain-extent-sized: recreate it to the new extent too
+            // (device idle from wait_idle above; free the old one back to the allocator first).
+            self.depth.destroy(&self.device, &mut self.allocator);
+            self.depth = depth::DepthResources::new(
+                &self.instance,
+                &self.device,
+                &mut self.allocator,
+                self.swapchain.extent,
+            )?;
             self.pending_resize = None;
         }
 
+        let ubo = uniform::UniformBufferObject { model, view, proj };
         match self.frame_context.draw_frame(
             &self.device,
             &self.pipeline,
             &self.swapchain,
+            &self.depth,
+            &self.uniforms,
             &self.vertex_buffer,
             &self.index_buffer,
+            &ubo,
         )? {
             command::FrameOutcome::Rendered => {}
             command::FrameOutcome::SwapchainOutOfDate => {
@@ -157,9 +203,14 @@ impl Drop for VulkanRenderer {
         // device/instance they were built from.
         unsafe {
             ManuallyDrop::drop(&mut self.frame_context);
+            // Pipeline before uniforms: its pipeline layout references the descriptor-set layout
+            // that `uniforms` owns and destroys.
             ManuallyDrop::drop(&mut self.pipeline);
-            // Free the buffers back to the allocator, then drop the allocator -- every allocation
-            // must outlive neither the allocator nor the device it was built from.
+            // Free everything allocator-backed (uniforms' buffers, depth image, vertex/index
+            // buffers) before dropping the allocator -- every allocation must outlive neither the
+            // allocator nor the device it was built from.
+            self.uniforms.destroy(&self.device, &mut self.allocator);
+            self.depth.destroy(&self.device, &mut self.allocator);
             self.vertex_buffer
                 .destroy(&self.device, &mut self.allocator);
             self.index_buffer.destroy(&self.device, &mut self.allocator);

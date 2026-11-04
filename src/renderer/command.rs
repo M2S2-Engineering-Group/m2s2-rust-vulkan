@@ -5,10 +5,12 @@
 
 use crate::error::{Result, VulkanError};
 use crate::renderer::buffer::Buffer;
+use crate::renderer::depth::DepthResources;
 use crate::renderer::device::VulkanDevice;
 use crate::renderer::instance::VulkanInstance;
 use crate::renderer::pipeline::GraphicsPipeline;
 use crate::renderer::swapchain::VulkanSwapchain;
+use crate::renderer::uniform::{UniformBufferObject, Uniforms};
 use ash::vk;
 
 pub const FRAMES_IN_FLIGHT: usize = 2;
@@ -128,13 +130,17 @@ impl FrameContext {
 
     /// Runs one full frame against `swapchain`, using `pipeline` to draw. See
     /// specs/002's "Per-frame protocol" and "Recording sequence" sections.
-    pub fn draw_frame(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_frame(
         &mut self,
         device: &VulkanDevice,
         pipeline: &GraphicsPipeline,
         swapchain: &VulkanSwapchain,
+        depth: &DepthResources,
+        uniforms: &Uniforms,
         vertex_buffer: &Buffer,
         index_buffer: &Buffer,
+        ubo: &UniformBufferObject,
     ) -> Result<FrameOutcome> {
         let dev = &device.device;
         let frame = self.current_frame;
@@ -177,12 +183,19 @@ impl FrameContext {
             dev.reset_fences(&[fence]).map_err(VulkanError::from)?;
         }
 
+        // 3b. Write this frame's MVP into its uniform buffer. Safe without extra sync: the buffer is
+        //     per-frame-in-flight and step 1's fence wait guarantees the GPU finished the previous
+        //     use of this slot.
+        uniforms.update(frame, ubo);
+
         // 4. Record the command buffer.
         self.record(
             dev,
             cmd,
             pipeline,
             swapchain,
+            depth,
+            uniforms.descriptor_set(frame),
             image_index,
             vertex_buffer,
             index_buffer,
@@ -245,6 +258,8 @@ impl FrameContext {
         cmd: vk::CommandBuffer,
         pipeline: &GraphicsPipeline,
         swapchain: &VulkanSwapchain,
+        depth: &DepthResources,
+        descriptor_set: vk::DescriptorSet,
         image_index: u32,
         vertex_buffer: &Buffer,
         index_buffer: &Buffer,
@@ -279,6 +294,27 @@ impl FrameContext {
                 &[to_color],
             );
 
+            // a2. UNDEFINED -> DEPTH_STENCIL_ATTACHMENT_OPTIMAL. old_layout UNDEFINED every frame is
+            //     fine: the depth buffer is cleared at load, so its prior contents don't matter.
+            let to_depth = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(depth.image())
+                .subresource_range(depth_subresource_range());
+            dev.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_depth],
+            );
+
             // b. Begin dynamic rendering into the acquired image view, clearing to dark blue.
             let clear = vk::ClearValue {
                 color: vk::ClearColorValue {
@@ -292,18 +328,40 @@ impl FrameContext {
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(clear);
             let color_attachments = [color_attachment];
+            // Depth attachment: clear to the far plane (1.0) each frame; don't store (nothing reads
+            // depth after the pass).
+            let depth_attachment = vk::RenderingAttachmentInfo::default()
+                .image_view(depth.view())
+                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 1.0,
+                        stencil: 0,
+                    },
+                });
             let rendering_info = vk::RenderingInfo::default()
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent,
                 })
                 .layer_count(1)
-                .color_attachments(&color_attachments);
+                .color_attachments(&color_attachments)
+                .depth_attachment(&depth_attachment);
             self.dynamic_rendering
                 .cmd_begin_rendering(cmd, &rendering_info);
 
-            // c. Bind the pipeline.
+            // c. Bind the pipeline and the per-frame MVP descriptor set (set = 0).
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
+            dev.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline.pipeline_layout,
+                0,
+                &[descriptor_set],
+                &[],
+            );
 
             // d. Viewport + scissor are dynamic (spec 001), so they must be set every recording.
             let viewport = vk::Viewport {
@@ -363,6 +421,15 @@ fn next_frame(current: usize) -> usize {
 fn color_subresource_range() -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .base_mip_level(0)
+        .level_count(1)
+        .base_array_layer(0)
+        .layer_count(1)
+}
+
+fn depth_subresource_range() -> vk::ImageSubresourceRange {
+    vk::ImageSubresourceRange::default()
+        .aspect_mask(vk::ImageAspectFlags::DEPTH)
         .base_mip_level(0)
         .level_count(1)
         .base_array_layer(0)

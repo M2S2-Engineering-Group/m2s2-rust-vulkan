@@ -210,4 +210,31 @@ Resolve during implementation; record the answer in Outcome.
 
 ## Outcome
 
-(Filled in after implementation.)
+Implemented as specified; the module split (`depth.rs`, `uniform.rs`, extended `buffer.rs`), ownership,
+and destroy order all held up. Pure logic was TDD'd (`select_depth_format`, 3 tests, red→green); the UBO
+layout has a guard test. 23 unit tests pass; fmt/clippy/build all clean.
+
+**Open questions resolved** (all four confirmed against `m2s2-math`'s actual source):
+
+1. **Y-flip — needed.** `perspective_rh_zo` produces an OpenGL-style Y (positive `f` in row 1, no flip),
+   so without correction the scene is vertically mirrored. Fixed in `math::perspective` by negating
+   element `(1,1)` — keeping the Vulkan convention in that layer, which already documented it. This had a
+   **knock-on**: the Y-flip inverts screen-space winding, so the pipeline's front face was changed
+   `CLOCKWISE → COUNTER_CLOCKWISE` (pipeline.rs) and the cube authored CCW-outward. (The old CLOCKWISE
+   suited the pre-projection clip-space quad.)
+2. **Matrix order — row-major.** `m2s2-math` stores `data[row * cols + col]`; GLSL defaults to
+   column-major, so the shader's UBO block is declared `layout(row_major)`. Size (192) is unaffected.
+3. **`Mat4: Pod` — holds** under the `bytemuck` feature; the `[[f32;4];4]` fallback wasn't needed.
+4. **Depth load/store/layout** — `DONT_CARE` store and an `UNDEFINED → DEPTH_STENCIL_ATTACHMENT_OPTIMAL`
+   transition every frame are validation-clean.
+
+**Deviation from the spec's signatures:** `DepthResources::new` also takes `&VulkanInstance` (not just
+`&VulkanDevice`) — the depth-format query needs `get_physical_device_format_properties`, which lives on the
+instance. `VulkanDevice` exposes `physical_device` but no instance handle.
+
+**Verification.** Ran `cargo run --example triangle` on an Apple M5 (kosmickrisp Vulkan driver) with
+validation layers ON: it created the pipeline, ran the render loop over many frames, and handled a window
+resize (exercising depth-image recreation) with **zero validation errors/warnings**. Visual confirmation of
+the spinning cube (orientation, occlusion, colors) is left to a human with the window on screen — a headless
+session can't observe rendered pixels, only that the GPU work is validation-clean. If the cube looks
+mirrored or inside-out on a given setup, the `(1,1)` flip and the front-face winding are the two knobs.

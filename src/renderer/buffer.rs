@@ -106,6 +106,46 @@ impl Buffer {
         })
     }
 
+    /// Create a `HOST_VISIBLE` buffer that gpu-allocator keeps persistently mapped, for data the CPU
+    /// rewrites every frame (uniform buffers). Unlike `new_device_local` there's no staging copy —
+    /// the caller writes straight into the mapping via `write_mapped`. `len` is left 0 (not a draw
+    /// source). See specs/006.
+    pub(crate) fn new_host_visible_mapped(
+        device: &VulkanDevice,
+        allocator: &mut Allocator,
+        size: u64,
+        usage: vk::BufferUsageFlags,
+    ) -> Result<Self> {
+        let (buffer, allocation) = create_buffer(
+            device,
+            allocator,
+            size,
+            usage,
+            MemoryLocation::CpuToGpu,
+            "uniform",
+        )?;
+        Ok(Self {
+            buffer,
+            allocation: Some(allocation),
+            len: 0,
+        })
+    }
+
+    /// Copy `bytes` into this buffer's persistent mapping. Only valid on a buffer from
+    /// `new_host_visible_mapped`. Takes `&self`: it writes through the allocation's mapped pointer
+    /// (no `&mut` needed), so a per-frame uniform update doesn't require mutable access. The caller
+    /// must ensure the GPU isn't still reading this buffer (the per-frame-in-flight fence handles
+    /// that in the render loop).
+    pub(crate) fn write_mapped(&self, bytes: &[u8]) {
+        let ptr = self
+            .allocation
+            .as_ref()
+            .and_then(|a| a.mapped_ptr())
+            .expect("host-visible mapped buffer has a mapping")
+            .as_ptr() as *mut u8;
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()) };
+    }
+
     /// Element count (vertices or indices), for `cmd_draw` / `cmd_draw_indexed`.
     pub(crate) fn len(&self) -> u32 {
         self.len
