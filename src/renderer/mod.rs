@@ -4,10 +4,14 @@ mod cleanup;
 pub mod command;
 pub mod depth;
 pub mod device;
+pub mod diagnostics;
+mod image;
 pub mod instance;
 pub mod pipeline;
 pub mod swapchain;
+pub mod text;
 pub mod uniform;
+mod upload;
 
 use crate::error::{Result, VulkanError};
 use crate::math::Mat4;
@@ -44,6 +48,12 @@ pub struct VulkanRenderer {
     // A pending resize target in physical pixels; the next `render_frame` recreates the swapchain to
     // it. Set by `resize` and by an out-of-date frame. `None` = nothing pending.
     pending_resize: Option<(u32, u32)>,
+    text_renderer: Option<text::TextRenderer>,
+    pipeline_formats: (vk::Format, vk::Format),
+    text_vertices: Vec<text::TextVertex>,
+    device_name: String,
+    scene_draw_calls: usize,
+    submitted_indices: u64,
 }
 
 impl VulkanRenderer {
@@ -135,6 +145,15 @@ impl VulkanRenderer {
         let depth = depth.unwrap();
         let uniforms = uniforms.unwrap();
 
+        let properties = unsafe {
+            instance
+                .instance
+                .get_physical_device_properties(device.physical_device)
+        };
+        let device_name = unsafe { std::ffi::CStr::from_ptr(properties.device_name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        let pipeline_formats = (swapchain.format, depth.format());
         Ok(Self {
             instance: ManuallyDrop::new(instance),
             device: ManuallyDrop::new(device),
@@ -147,6 +166,12 @@ impl VulkanRenderer {
             depth,
             allocator: ManuallyDrop::new(allocator),
             pending_resize: None,
+            text_renderer: None,
+            pipeline_formats,
+            text_vertices: Vec::new(),
+            device_name,
+            scene_draw_calls: 0,
+            submitted_indices: 0,
         })
     }
 
@@ -167,6 +192,18 @@ impl VulkanRenderer {
     /// Draw one copy of the uploaded mesh per model transform with a shared camera.
     /// An empty slice clears and presents the frame without drawing geometry.
     pub fn render_objects(&mut self, models: &[Mat4], view: Mat4, proj: Mat4) -> Result<()> {
+        self.render_objects_with_text(models, view, proj, &[])
+    }
+
+    /// Draw scene geometry, then screen-space text. Text is borrowed for this frame only.
+    /// Invalid text/overflow returns an error before acquiring or submitting a frame.
+    pub fn render_objects_with_text(
+        &mut self,
+        models: &[Mat4],
+        view: Mat4,
+        proj: Mat4,
+        text: &[text::TextDraw<'_>],
+    ) -> Result<()> {
         if let Some((width, height)) = self.pending_resize {
             if width == 0 || height == 0 {
                 // Minimized: can't build a swapchain. Keep the pending size and skip drawing.
@@ -189,11 +226,39 @@ impl VulkanRenderer {
             )?;
             self.depth.destroy(&self.device, &mut self.allocator);
             self.depth = replacement;
+            // Dynamic viewport/scissor handles extent changes, but formats are pipeline state.
+            if let Some(renderer) = self.text_renderer.as_mut() {
+                renderer.ensure_formats(
+                    &self.device,
+                    self.swapchain.format,
+                    self.depth.format(),
+                )?;
+            }
+            if self.pipeline_formats != (self.swapchain.format, self.depth.format()) {
+                let pipeline = pipeline::GraphicsPipeline::new(
+                    &self.device,
+                    self.swapchain.format,
+                    self.depth.format(),
+                    self.uniforms.descriptor_set_layout(),
+                )?;
+                let old = std::mem::replace(&mut self.pipeline, ManuallyDrop::new(pipeline));
+                drop(ManuallyDrop::into_inner(old));
+                self.pipeline_formats = (self.swapchain.format, self.depth.format());
+            }
             self.pending_resize = None;
         }
 
+        text::layout_text(text, self.swapchain.extent, &mut self.text_vertices)?;
+        if !self.text_vertices.is_empty() && self.text_renderer.is_none() {
+            self.text_renderer = Some(text::TextRenderer::new(
+                &self.device,
+                &mut self.allocator,
+                self.swapchain.format,
+                self.depth.format(),
+            )?);
+        }
         let camera = uniform::CameraUniforms { view, proj };
-        match self.frame_context.draw_frame(
+        let outcome = self.frame_context.draw_frame(
             &self.device,
             &self.pipeline,
             &self.swapchain,
@@ -203,9 +268,16 @@ impl VulkanRenderer {
             &self.index_buffer,
             &camera,
             models,
-        )? {
+            self.text_renderer.as_ref(),
+            &self.text_vertices,
+        )?;
+        if outcome.submitted() {
+            self.scene_draw_calls = models.len();
+            self.submitted_indices = models.len() as u64 * u64::from(self.index_buffer.len());
+        }
+        match outcome {
             command::FrameOutcome::Rendered => {}
-            command::FrameOutcome::SwapchainOutOfDate => {
+            command::FrameOutcome::SwapchainOutOfDate { .. } => {
                 // Recreate next frame; `recreate` re-queries the surface for the true size, so the
                 // current extent is just a fallback hint.
                 let extent = self.swapchain.extent;
@@ -213,6 +285,23 @@ impl VulkanRenderer {
             }
         }
         Ok(())
+    }
+
+    /// Snapshot of the current surface and most recently submitted scene work.
+    pub fn stats(&self) -> diagnostics::RendererStats<'_> {
+        diagnostics::RendererStats {
+            device_name: &self.device_name,
+            extent: (self.swapchain.extent.width, self.swapchain.extent.height),
+            color_format: self.swapchain.format,
+            image_count: self.swapchain.images.len(),
+            scene_draw_calls: self.scene_draw_calls,
+            submitted_indices: self.submitted_indices,
+            status: match self.pending_resize {
+                Some((0, _)) | Some((_, 0)) => diagnostics::RenderStatus::Paused,
+                Some(_) => diagnostics::RenderStatus::ResizePending,
+                None => diagnostics::RenderStatus::Ready,
+            },
+        }
     }
 
     pub fn wait_idle(&self) -> Result<()> {
@@ -239,6 +328,9 @@ impl Drop for VulkanRenderer {
         // device/instance they were built from.
         unsafe {
             ManuallyDrop::drop(&mut self.frame_context);
+            if let Some(mut text) = self.text_renderer.take() {
+                text.destroy(&self.device, &mut self.allocator);
+            }
             // Pipeline before uniforms: its pipeline layout references the descriptor-set layout
             // that `uniforms` owns and destroys.
             ManuallyDrop::drop(&mut self.pipeline);

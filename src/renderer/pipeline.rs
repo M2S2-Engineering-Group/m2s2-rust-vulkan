@@ -42,6 +42,17 @@ fn validate_push_limit(limit: u32) -> Result<()> {
     Ok(())
 }
 
+pub(super) struct PipelineDescription<'a> {
+    pub vertex_shader: &'a [u8],
+    pub fragment_shader: &'a [u8],
+    pub binding: vk::VertexInputBindingDescription,
+    pub attributes: &'a [vk::VertexInputAttributeDescription],
+    pub depth_test: bool,
+    pub cull_mode: vk::CullModeFlags,
+    pub blend: bool,
+    pub push_ranges: &'a [vk::PushConstantRange],
+}
+
 pub struct GraphicsPipeline {
     // pub(crate): command.rs (spec 002) needs to read these to record vkCmdBindPipeline. Not
     // `pub` -- nothing outside this crate should reach into a Vulkan handle directly.
@@ -63,14 +74,39 @@ impl GraphicsPipeline {
         descriptor_set_layout: vk::DescriptorSetLayout,
     ) -> Result<Self> {
         validate_push_limit(device.max_push_constants_size)?;
+        Self::create(
+            device,
+            color_format,
+            depth_format,
+            descriptor_set_layout,
+            PipelineDescription {
+                vertex_shader: VERTEX_SHADER,
+                fragment_shader: FRAGMENT_SHADER,
+                binding: Vertex::binding_description(),
+                attributes: &Vertex::attribute_descriptions(),
+                depth_test: true,
+                cull_mode: vk::CullModeFlags::BACK,
+                blend: false,
+                push_ranges: &[model_push_range()],
+            },
+        )
+    }
+
+    pub(super) fn create(
+        device: &VulkanDevice,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+        descriptor_set_layout: vk::DescriptorSetLayout,
+        description: PipelineDescription<'_>,
+    ) -> Result<Self> {
         let device = &device.device;
 
         // include_bytes! gives &[u8] with no alignment guarantee; VkShaderModuleCreateInfo wants
         // &[u32]. read_spv reads the little-endian SPIR-V words correctly regardless of alignment
         // (a raw bytemuck cast would be UB on an unaligned slice).
-        let vertex_code = ash::util::read_spv(&mut Cursor::new(VERTEX_SHADER))
+        let vertex_code = ash::util::read_spv(&mut Cursor::new(description.vertex_shader))
             .map_err(|e| VulkanError::InitializationError(format!("bad vertex SPIR-V: {e}")))?;
-        let fragment_code = ash::util::read_spv(&mut Cursor::new(FRAGMENT_SHADER))
+        let fragment_code = ash::util::read_spv(&mut Cursor::new(description.fragment_shader))
             .map_err(|e| VulkanError::InitializationError(format!("bad fragment SPIR-V: {e}")))?;
 
         let vertex_module = Self::create_shader_module(device, &vertex_code)?;
@@ -94,13 +130,13 @@ impl GraphicsPipeline {
                 .name(entry_name),
         ];
 
-        // Vertex input: one per-vertex binding + the position/color attributes, from the Vertex
-        // type (buffer.rs). Must stay alive until create_graphics_pipelines reads through it below.
-        let binding_descriptions = [Vertex::binding_description()];
-        let attribute_descriptions = Vertex::attribute_descriptions();
+        // Shared construction accepts scene or text vertex layouts; the caller keeps descriptions
+        // alive until create_graphics_pipelines reads them.
+        let binding_descriptions = [description.binding];
+        let attribute_descriptions = description.attributes;
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&binding_descriptions)
-            .vertex_attribute_descriptions(&attribute_descriptions);
+            .vertex_attribute_descriptions(attribute_descriptions);
 
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
@@ -117,7 +153,7 @@ impl GraphicsPipeline {
 
         let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
-            .cull_mode(vk::CullModeFlags::BACK)
+            .cull_mode(description.cull_mode)
             // COUNTER_CLOCKWISE: the perspective Y-flip (see math::perspective) inverts screen-space
             // winding, so standard CCW-outward geometry is front-facing under this setting. (Spec 006
             // changed this from CLOCKWISE, which suited the pre-projection clip-space quad.)
@@ -128,27 +164,31 @@ impl GraphicsPipeline {
             .rasterization_samples(vk::SampleCountFlags::TYPE_1)
             .sample_shading_enable(false);
 
-        // Depth test enabled: fragments nearer the camera (smaller depth, LESS) win and write their
-        // depth back. Required for the cube's far faces to be occluded by its near ones (spec 006).
+        // Scene geometry tests/writes depth; text overlays disable both.
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(true)
-            .depth_write_enable(true)
+            .depth_test_enable(description.depth_test)
+            .depth_write_enable(description.depth_test)
             .depth_compare_op(vk::CompareOp::LESS)
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);
 
         let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
-            .blend_enable(false)
+            .blend_enable(description.blend)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .alpha_blend_op(vk::BlendOp::ADD)
             .color_write_mask(vk::ColorComponentFlags::RGBA)];
         let color_blending =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
 
-        // One descriptor set (set = 0): the per-frame camera uniform block (spec 007).
+        // Set 0 contains the camera UBO for scene geometry or the sampled font atlas for text.
         let set_layouts = [descriptor_set_layout];
-        let push_ranges = [model_push_range()];
         let layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&set_layouts)
-            .push_constant_ranges(&push_ranges);
+            .push_constant_ranges(description.push_ranges);
         let pipeline_layout = unsafe {
             device
                 .create_pipeline_layout(&layout_info, None)

@@ -44,7 +44,7 @@ The runtime check does not establish correctness on hardware with separate queue
 interactive resize/minimize/restore and graceful window-close teardown still need manual verification;
 the smoke run was stopped through the terminal. Recovery from device loss or a retired swapchain after
 failed recreation is outside this fix: callers should treat Vulkan errors as fatal and tear down safely.
-A changed swapchain attachment format requiring pipeline recreation remains a future hardening item.
+Spec 008 subsequently added pipeline recreation when swapchain attachment formats change.
 
 ## Next
 
@@ -53,4 +53,26 @@ copies of one mesh. Its verification used a temporary automated cube example to 
 resizes, minimize/restore, clear-only and single-object frames, and normal event-loop shutdown. That run
 exited successfully without emitted synchronization-validation errors. This supplements the original
 review smoke run; rendered-pixel correctness and separate-family hardware remain unverified.
-[Spec 008](specs/008-diagnostic-text-overlay.md) captures the proposed Phase 2 diagnostic overlay.
+[Spec 008](specs/008-diagnostic-text-overlay.md) implements reusable text drawing and the Phase 2 diagnostic overlay.
+
+## Spec 008 implementation follow-up
+
+- Added per-frame `TextDraw` submissions with physical-pixel placement, font scale, linear RGBA,
+  newline support, viewport clipping, and an explicit 2048-visible-glyph limit. Existing rendering APIs
+  forward empty text; text resources are created lazily.
+- Kept CPU `Diagnostics` separate from the text renderer. It formats explicit camera position, a
+  rolling 60-sample FPS/CPU interval, cached GPU name, swapchain details, and last-submitted scene counts.
+  Scene counts exclude overlay draws and skipped acquisition. GPU timing remains deferred.
+- Shared pipeline construction and one-time command submission between geometry and text. Font upload
+  uses a reusable sampled-R8 image path; bundled public-domain font provenance and regeneration are
+  documented in `assets/README.md`.
+- Added per-frame fence-protected text buffers, alpha-blended drawing after geometry with depth
+  disabled, constructor rollback, ordered teardown, and format-dependent scene/text pipeline recreation.
+- Updated the cube example to show diagnostics by default with F3 visibility control.
+
+Verification: all 48 CPU tests, formatting, Clippy with warnings denied, all-target build, shader
+validation, and whitespace checks pass. A GPU probe exercised resize, hide/show, minimize/restore,
+clear-only and single-object text, submitted-count assertions, and normal shutdown without emitted
+synchronization-validation errors. A captured Vulkan frame was visually inspected for readable text.
+The temporary probe was removed. Cross-platform runtime checks and injected GPU-allocation failures
+remain unverified; the full API/lifetime contract and outcome are recorded in spec 008.

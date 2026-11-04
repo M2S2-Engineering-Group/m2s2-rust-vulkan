@@ -4,6 +4,8 @@ pub mod renderer;
 
 pub use error::{Result, VulkanError};
 pub use renderer::buffer::{Index, Vertex};
+pub use renderer::diagnostics::{Diagnostics, RenderStatus, RendererStats};
+pub use renderer::text::TextDraw;
 pub use renderer::VulkanRenderer;
 
 /// Initialize logging for the library

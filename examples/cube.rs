@@ -1,8 +1,11 @@
-use m2s2_rust_vulkan::math::{look_at, perspective, rotate, to_radians, translate, Vec3};
-use m2s2_rust_vulkan::{init_logging, Index, Vertex, VulkanRenderer};
+use m2s2_rust_vulkan::math::{
+    look_at, perspective, rotate, to_radians, translate, Vec2, Vec3, Vec4,
+};
+use m2s2_rust_vulkan::{init_logging, Diagnostics, Index, TextDraw, Vertex, VulkanRenderer};
 use std::time::Instant;
-use winit::event::{Event, WindowEvent};
+use winit::event::{ElementState, Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::WindowBuilder;
 
@@ -80,6 +83,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The "simulation" side: a start time the cube's model matrix spins off of. This is what a game
     // engine's update step would own; the renderer only receives the resulting matrices (spec 006).
     let start = Instant::now();
+    let mut last_frame = start;
+    let mut diagnostics = Diagnostics::default();
+    let mut show_diagnostics = true;
 
     log::info!("Starting render loop...");
     event_loop.run(move |event, elwt| {
@@ -101,7 +107,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 log::info!("Window resized to: {physical_size:?}");
                 renderer.resize((physical_size.width, physical_size.height));
             }
+            Event::WindowEvent {
+                event: WindowEvent::KeyboardInput { event, .. },
+                ..
+            } if event.state == ElementState::Pressed
+                && !event.repeat
+                && event.physical_key == PhysicalKey::Code(KeyCode::F3) =>
+            {
+                show_diagnostics = !show_diagnostics;
+            }
             Event::AboutToWait => {
+                let now = Instant::now();
+                diagnostics.update(now.duration_since(last_frame));
+                last_frame = now;
                 let size = window.inner_size();
                 if size.width == 0 || size.height == 0 {
                     return; // minimized; nothing to draw
@@ -116,15 +134,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     translate(&Vec3::new(CUBE_CENTER_OFFSET, 0.0, -0.4))
                         * rotate(&Vec3::new(1.0, 0.0, 0.0), -angle * 0.7),
                 ];
+                let camera_position = Vec3::new(2.0, 2.0, 2.0);
                 let view = look_at(
-                    &Vec3::new(2.0, 2.0, 2.0),
+                    &camera_position,
                     &Vec3::new(0.0, 0.0, 0.0),
                     &Vec3::new(0.0, 1.0, 0.0),
                 );
                 let proj = perspective(to_radians(45.0), aspect, 0.1, 10.0);
 
-                if let Err(e) = renderer.render_objects(&models, view, proj) {
+                let diagnostic_text = diagnostics.format(&renderer.stats(), camera_position);
+                let text = [TextDraw {
+                    text: &diagnostic_text,
+                    position: Vec2::new(12.0, 12.0),
+                    scale: window.scale_factor() as f32,
+                    color: Vec4::new(1.0, 1.0, 1.0, 1.0),
+                }];
+                let text = if show_diagnostics { &text[..] } else { &[] };
+                if let Err(e) = renderer.render_objects_with_text(&models, view, proj, text) {
                     log::error!("Render error: {e}");
+                    elwt.exit();
                 }
             }
             _ => {}

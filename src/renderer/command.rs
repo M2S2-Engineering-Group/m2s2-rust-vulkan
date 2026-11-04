@@ -3,6 +3,7 @@
 // rendering gap" section, since this is the one part of the render loop that can't be a
 // straight port of vulkan-tutorial.com's render-pass-based version.
 
+use super::text::{TextRenderer, TextVertex};
 use crate::error::{Result, VulkanError};
 use crate::math::Mat4;
 use crate::renderer::buffer::Buffer;
@@ -22,7 +23,16 @@ pub const FRAMES_IN_FLIGHT: usize = 2;
 /// window resized) and the caller should recreate it.
 pub enum FrameOutcome {
     Rendered,
-    SwapchainOutOfDate,
+    SwapchainOutOfDate { submitted: bool },
+}
+
+impl FrameOutcome {
+    pub(super) fn submitted(&self) -> bool {
+        matches!(
+            self,
+            Self::Rendered | Self::SwapchainOutOfDate { submitted: true }
+        )
+    }
 }
 
 pub struct FrameContext {
@@ -130,7 +140,7 @@ impl FrameContext {
     /// Runs one full frame against `swapchain`, using `pipeline` to draw. See
     /// specs/002's "Per-frame protocol" and "Recording sequence" sections.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn draw_frame(
+    pub(super) fn draw_frame(
         &mut self,
         device: &VulkanDevice,
         pipeline: &GraphicsPipeline,
@@ -141,6 +151,8 @@ impl FrameContext {
         index_buffer: &Buffer,
         camera: &CameraUniforms,
         models: &[Mat4],
+        text: Option<&TextRenderer>,
+        text_vertices: &[TextVertex],
     ) -> Result<FrameOutcome> {
         let dev = &device.device;
         let frame = self.current_frame;
@@ -172,7 +184,9 @@ impl FrameContext {
                 needs_recreate |= suboptimal;
                 index
             }
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => return Ok(FrameOutcome::SwapchainOutOfDate),
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                return Ok(FrameOutcome::SwapchainOutOfDate { submitted: false })
+            }
             Err(e) => return Err(VulkanError::from(e)),
         };
         // render-finished is per image (see field comment), indexed by the acquired image.
@@ -187,6 +201,9 @@ impl FrameContext {
         //     per-frame-in-flight and step 1's fence wait guarantees the GPU finished the previous
         //     use of this slot.
         uniforms.update(frame, camera);
+        if let Some(text) = text {
+            text.update(frame, text_vertices);
+        }
 
         // 4. Record the command buffer.
         self.record(
@@ -200,6 +217,9 @@ impl FrameContext {
             vertex_buffer,
             index_buffer,
             models,
+            text,
+            frame,
+            text_vertices.len() as u32,
         )?;
 
         // 5. Submit: wait on image_available at the color-write stage, signal render_finished,
@@ -242,7 +262,7 @@ impl FrameContext {
         self.current_frame = next_frame(frame);
 
         Ok(if needs_recreate {
-            FrameOutcome::SwapchainOutOfDate
+            FrameOutcome::SwapchainOutOfDate { submitted: true }
         } else {
             FrameOutcome::Rendered
         })
@@ -265,6 +285,9 @@ impl FrameContext {
         vertex_buffer: &Buffer,
         index_buffer: &Buffer,
         models: &[Mat4],
+        text: Option<&TextRenderer>,
+        frame: usize,
+        text_vertex_count: u32,
     ) -> Result<()> {
         let image = swapchain.images[image_index as usize];
         let image_view = swapchain.image_views[image_index as usize];
@@ -399,6 +422,10 @@ impl FrameContext {
                     dev.cmd_draw_indexed(cmd, index_count, 1, 0, 0, 0);
                 }
             });
+
+            if let Some(text) = text {
+                text.record(dev, cmd, frame, text_vertex_count);
+            }
 
             // f. End rendering.
             self.dynamic_rendering.cmd_end_rendering(cmd);
@@ -546,6 +573,13 @@ mod tests {
                 RecordedCommand::Draw(36),
             ]
         );
+    }
+
+    #[test]
+    fn out_of_date_acquire_does_not_count_as_submission() {
+        assert!(!FrameOutcome::SwapchainOutOfDate { submitted: false }.submitted());
+        assert!(FrameOutcome::SwapchainOutOfDate { submitted: true }.submitted());
+        assert!(FrameOutcome::Rendered.submitted());
     }
 
     #[test]

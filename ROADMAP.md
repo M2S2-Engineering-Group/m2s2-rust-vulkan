@@ -58,7 +58,7 @@ What separates "a triangle renders" from "a usable rendering engine" for simple 
 - [ ] **Textures**: image loading, `VkImage`/`VkImageView` creation, layout transitions, samplers, mipmaps
 - [x] **Multiple draw calls**: independently transformed copies of one mesh through one pipeline — [spec 007](specs/007-multiple-objects-and-push-constants.md)
 - [ ] **Basic instancing**: deferred; 007 issues separate indexed draws
-- [ ] **Diagnostic text overlay**: camera position, FPS/CPU frame interval, device and swapchain state — [draft spec 008](specs/008-diagnostic-text-overlay.md); reuse texture upload support
+- [x] **Text drawing and diagnostic overlay**: reusable text submissions; camera position, FPS/CPU frame interval, scene counts, device and swapchain state — [spec 008](specs/008-diagnostic-text-overlay.md). Shared sampled-R8 uploads are available; general textures remain below.
 - [ ] **Basic lighting**: Phong/Blinn-Phong (ambient + diffuse + specular), normals, one or more point/
       directional lights
 

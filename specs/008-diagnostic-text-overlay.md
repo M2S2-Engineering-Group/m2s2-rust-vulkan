@@ -1,93 +1,138 @@
-# 008: Diagnostic text overlay
+# 008: Text drawing and diagnostic overlay
 
-**Status**: Draft proposal; not implemented.
+**Status**: Implemented.
 **Roadmap item**: Phase 2, diagnostic text overlay.
 
 ## Goal
 
-Display camera position, FPS, CPU frame time, and useful Vulkan state directly over the scene.
-The overlay should make a bad camera, mismatched viewport, missing draws, or unexpected GPU selection
-visible without switching to a terminal.
-
-## Placement and scope
-
-Place this in Phase 2 after 007. Implement after the first texture/sampler upload path so a font atlas
-can reuse that infrastructure. If diagnostics are needed sooner, pull forward only the atlas-sized
-image upload/sampler work and share it with later textures; do not create a second image uploader.
-
-Initial metrics:
-- Camera world position, supplied explicitly by the caller (the renderer does not own the camera).
-- FPS and CPU frame interval in milliseconds, computed from caller-provided elapsed frame time.
-- Selected physical-device name; swapchain extent, color format, and image count.
-- Draw calls and submitted index count for the most recent submitted scene frame.
-- Whether rendering is paused for zero extent or a swapchain recreation is pending.
-
-Use a rolling timing window so the text remains readable; label CPU frame interval honestly. FPS is
-application frame cadence, not a measurement of monitor presentation rate. Do not report skipped frames
-as submitted GPU work. Initialize timing as unavailable until a valid positive sample is received.
+Provide reusable screen-space text rendering, then display camera position, CPU frame cadence, and
+Vulkan state using it. Diagnostics formatting has no GPU ownership; text rendering has no diagnostic
+knowledge. The caller retains window, input, camera, and event-loop ownership.
 
 ## Non-goals
 
-A general GUI, editable controls, graphs, font shaping/localization, a scene inspector, and device-loss
-recovery. GPU timestamps, allocator memory budgets, pipeline statistics, and validation-message history
-can follow later. GPU frame time must come from timestamp queries, never from CPU wall-clock timing.
+General GUI controls, text wrapping/shaping/localization, world-space labels, GPU timestamps, memory
+budgets, pipeline statistics, and validation history. CPU frame interval is never labeled GPU time.
 
-## Proposed public API
+## Public API
 
-The exact API should be finalized before implementation. Preserve existing render methods and keep
-window/input ownership with the caller. Proposed additions:
+Re-export from the crate root:
 
 ```rust
-pub enum DiagnosticOverlay { Hidden, Visible }
-
-pub struct DiagnosticInput {
-    pub camera_position: Vec3,
-    pub frame_interval: std::time::Duration,
+pub struct TextDraw<'a> {
+    pub text: &'a str,
+    pub position: Vec2,
+    pub scale: f32,
+    pub color: Vec4,
 }
 
 impl VulkanRenderer {
-    pub fn set_diagnostic_overlay(&mut self, visibility: DiagnosticOverlay);
-    pub fn update_diagnostics(&mut self, input: DiagnosticInput);
+    pub fn render_objects_with_text(
+        &mut self, models: &[Mat4], view: Mat4, proj: Mat4, text: &[TextDraw<'_>],
+    ) -> Result<()>;
+    pub fn stats(&self) -> RendererStats<'_>;
+}
+
+pub enum RenderStatus { Ready, ResizePending, Paused }
+
+pub struct RendererStats<'a> {
+    pub device_name: &'a str,
+    pub extent: (u32, u32),
+    pub color_format: vk::Format,
+    pub image_count: usize,
+    pub scene_draw_calls: usize,
+    pub submitted_indices: u64,
+    pub status: RenderStatus,
+}
+
+// Default constructs an empty timing window.
+pub struct Diagnostics { /* private CPU timing samples */ }
+impl Diagnostics {
+    pub fn update(&mut self, frame_interval: Duration);
+    pub fn reset(&mut self);
+    pub fn timing(&self) -> Option<(f64, f64)>; // FPS, milliseconds
+    pub fn format(&self, stats: &RendererStats<'_>, camera_position: Vec3) -> String;
 }
 ```
 
-Default to hidden. When enabled, existing render methods append text after scene geometry; a clear-only
-frame can still show diagnostics. The caller may map a key to visibility. Do not invert the view matrix
-to guess camera state. Cache static device details; do not query device properties on every frame.
+Existing `render_frame`/`render_objects` forward to the same frame path with empty text. Text is
+borrowed only for that call; no persistent print queue or hidden accumulation. Empty scene models
+still allow text over the clear color. Empty text emits no overlay commands.
 
-## Vulkan objects and lifetime
+Position is measured in physical pixels from the top-left. Scale multiplies the native 8-pixel glyph;
+newline advances 10 pixels times scale. Color is linear RGBA in [0,1]. The example uses the window's
+scale factor for legibility and maps F3 to visibility.
 
-A minimal bitmap font atlas, image/view/sampler, descriptor resources, alpha-blended text pipeline,
-and per-frame mapped text vertex/index buffers. Record overlay draws after scene draws, with depth
-writes/testing disabled and viewport/scissor set explicitly. Size text in physical pixels with an explicit
-scale supplied or selected by the caller for high-DPI readability.
+Unsupported characters become `?`; spaces advance without geometry. Scissoring clips partially visible
+glyphs and fully offscreen glyphs are skipped. Invalid scale/position/color or more than 2048 visible
+glyphs returns a validation error before acquiring/submitting a frame. Minimized zero-extent frames
+skip rendering. No wrapping or silent capacity truncation.
 
-Reuse the current color attachment inside the active dynamic-rendering scope if pipeline attachment
-formats are compatible; otherwise specify a second load-preserving scope and its dependencies explicitly.
-Bind a separate overlay pipeline/layout so camera/model state cannot accidentally affect text. Put font
-upload and layout transitions on the existing shared resource path. Rewrite a frame slot's mapped text
-buffers only after its fence signals. No per-frame wait-idle and no unbounded text allocation.
+`Diagnostics` averages the last 60 positive caller-provided frame intervals; zero samples are ignored.
+FPS is reciprocal average CPU interval, including any application waits, not monitor presentation rate.
+Before samples exist, timing is N/A. Reset clears the window. Camera position is supplied explicitly.
 
-Destroy overlay buffers/images before their allocator and device, and apply constructor rollback.
-Recreation must update extent-dependent state and rebuild pipelines if attachment formats change.
+Device name is cached at renderer initialization. Snapshot counts describe the last submitted scene
+frame, excluding overlay draws. They stay unchanged on skipped acquisition; zero objects submitted
+sets them to zero. `FrameOutcome::SwapchainOutOfDate` now carries `submitted: bool` to distinguish
+out-of-date acquisition from a submission followed by out-of-date/suboptimal presentation.
 
-## Test plan
+## Vulkan objects and ownership
 
-- Timing: valid samples, initial state, zero duration, rolling-window boundaries and reset.
-- Formatting: known camera coordinates, stable metric labels/units, unavailable state.
-- Counters: zero/one/multiple scene draws; exclude overlay draws from scene counts.
-- Visibility: hidden emits no overlay commands; visible emits text commands after scene draws.
-- Layout: bitmap glyph indices, clipping, bounded buffer capacity, scale and resize behavior.
-- GPU: readable text over moving geometry, independent of scene depth, correct resize/minimize/restore,
-  empty-scene overlay, no synchronization/validation errors, clean teardown.
-- Run all repository quality gates; GPU-dependent checks stay opt-in outside ordinary CPU CI.
+`TextRenderer` lazily owns a sampled R8 font image/allocation, view, nearest sampler, descriptor layout,
+pool/set, alpha-blended pipeline, and one fixed-capacity mapped vertex buffer per frame slot. Six
+vertices per glyph avoid a separate index buffer. CPU geometry storage is reused between frames.
 
-## Open questions
+`image.rs` provides the shared sampled-R8 upload path. `upload.rs` extracts the one-time submission
+already used by buffers; image and buffer uploads use it. Future texture formats should extend this
+path, not add another uploader. `GraphicsPipeline::create` shares construction between scene/text
+pipelines while declaring their different vertex inputs, depth, blending, and push-constant ranges.
 
-Before implementation, choose a small redistributable bitmap font and record its license/provenance;
-finalize scaling and fixed buffer capacity; decide whether the first version includes GPU timestamps.
-The recommended first version uses CPU timing only and labels it explicitly.
+Image upload transitions UNDEFINED -> TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL, with
+transfer-write -> fragment-read visibility. Startup upload waits on a fence. Per-frame mapped text
+updates wait for their frame slot's fence; there is no overlay-specific per-frame wait-idle.
 
-## Outcome
+Text records after scene geometry inside the existing dynamic-rendering scope. The pipeline uses the
+same color/depth attachment formats, disables depth testing/writing and culling, and alpha blends
+font coverage with the supplied color. It reuses the explicitly set viewport/scissor. Rebuild pipeline
+objects when attachment formats change; extent-only resize needs dynamic viewport/scissor updates.
 
-Pending design finalization and implementation. This captures the requested idea without changing 007.
+All constructor failures release completed resources. Shutdown waits for idle, destroys frame commands,
+text pipeline and mapped buffers, descriptor pool/layout, sampler/view/image and allocation, then the
+remaining scene resources, allocator, swapchain, device, and instance. Text buffers and images never
+outlive the allocator/device.
+
+## Font provenance and build
+
+Public-domain `font8x8_basic.h` from [Daniel Hepper's font8x8](https://github.com/dhepper/font8x8/blob/master/font8x8_basic.h)
+is bundled with its original notice. `assets/README.md` documents provenance and
+`python3 scripts/generate-font.py` regenerates the packed glyph bytes. The atlas is expanded at startup.
+No new dependencies or runtime downloads are needed.
+
+Compile shader changes offline and commit the SPIR-V alongside source:
+
+```sh
+glslc shaders/text.vert -o shaders/text.vert.spv
+glslc shaders/text.frag -o shaders/text.frag.spv
+spirv-val shaders/text.vert.spv
+spirv-val shaders/text.frag.spv
+```
+
+## Verification and outcome
+
+CPU tests cover atlas bits, vertex layout and shader parsing, positioning/scaling/color, separate text
+draws, newline/fallback characters, empty/new-frame reset, clipping/zero extent, invalid inputs and
+capacity boundary/overflow; timing's positive/zero/reset/window cases; explicit camera and metric
+formatting; sampled-image byte validation; and acquire-versus-submit outcomes. All 48 tests pass, as do
+formatting, Clippy with warnings denied, all-target build, and diff whitespace checks.
+
+Ran the cube with synchronization validation enabled. A temporary automated probe exercised resize,
+hide/show, minimize/restore, clear-only text, single-object text, scene count assertions, and normal
+shutdown; it exited successfully without emitted validation errors. Captured a Vulkan frame with the
+SDK screenshot layer and visually verified readable camera, FPS/CPU frame, GPU, swapchain, scene
+counts, and state text over the cubes. The temporary probe was removed.
+
+The first draft proposed a diagnostics-specific persistent API. Following design discussion, the final
+implementation uses per-frame text submissions and separate CPU diagnostics instead. General text
+rendering is available without constructing `Diagnostics`. GPU timestamps remain deferred. Testing on
+a second platform and injected GPU allocation failures remain future validation work.

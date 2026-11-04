@@ -170,4 +170,6 @@ Phase 1 and Phase 2 depth/uniform/camera support are implemented, including `exa
 its fixes and verification limits. [Spec 007](specs/007-multiple-objects-and-push-constants.md) implements
 multiple independently transformed copies of one mesh using push constants. `render_objects` accepts a
 model slice; `render_frame` remains a single-object compatibility wrapper. [Spec 008](specs/008-diagnostic-text-overlay.md)
-proposes a diagnostic text overlay and remains a draft.
+implements reusable per-frame text drawing with a separate CPU diagnostic formatter. The cube example
+shows camera/FPS/device/swapchain/scene metrics, with F3 visibility control. Shared `image.rs` and
+`upload.rs` supply sampled-R8 uploads and one-time submission; scene/text pipelines share construction.
