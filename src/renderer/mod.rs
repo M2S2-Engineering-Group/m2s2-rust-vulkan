@@ -115,10 +115,7 @@ impl VulkanRenderer {
                 depth.as_ref().unwrap().format(),
                 uniforms.as_ref().unwrap().descriptor_set_layout(),
             )?;
-            // FrameContext::new also takes &instance to build the VK_KHR_dynamic_rendering loader
-            // (see command.rs) -- a small tweak from spec 002's `new(&device)`.
-            let frame_context =
-                command::FrameContext::new(&instance, &device, swapchain.images.len())?;
+            let frame_context = command::FrameContext::new(&device, swapchain.images.len())?;
 
             Ok((pipeline, frame_context))
         })();

@@ -173,3 +173,8 @@ model slice; `render_frame` remains a single-object compatibility wrapper. [Spec
 implements reusable per-frame text drawing with a separate CPU diagnostic formatter. The cube example
 shows camera/FPS/device/swapchain/scene metrics, with F3 visibility control. Shared `image.rs` and
 `upload.rs` supply sampled-R8 uploads and one-time submission; scene/text pipelines share construction.
+[Spec 009](specs/009-vulkan-1-3-core-dynamic-rendering.md) raised the required API to Vulkan 1.3 so
+dynamic rendering is core: the `VK_KHR_dynamic_rendering` extension and its pre-1.2 dependency chain,
+the `get_physical_device_properties2` instance extension, and both the properties2 and
+dynamic-rendering loaders are gone; device selection now gates on a `>= 1.3` version check and
+`cmd_begin/end_rendering` are core `ash::Device` calls.

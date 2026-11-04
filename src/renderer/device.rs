@@ -7,17 +7,14 @@ use std::ffi::{c_char, CStr};
 /// Device extensions this engine requires of every physical device it selects and enables on the
 /// logical device. Single source of truth: `new` enables exactly this set and
 /// `supports_required_extensions` checks exactly this set, so the two can't drift apart.
-/// `VK_KHR_dynamic_rendering` is required by the pipeline (see specs/001-graphics-pipeline.md).
-const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[
-    ash::khr::swapchain::NAME,
-    ash::khr::dynamic_rendering::NAME,
-    // Dependency chain VK_KHR_dynamic_rendering pulls in on a pre-1.2 API: depth_stencil_resolve ->
-    // create_renderpass2 -> {multiview, maintenance2}. Required explicitly on our 1.0-API instance.
-    ash::khr::depth_stencil_resolve::NAME,
-    ash::khr::create_renderpass2::NAME,
-    ash::khr::multiview::NAME,
-    ash::khr::maintenance2::NAME,
-];
+/// Dynamic rendering (and the depth_stencil_resolve/create_renderpass2/multiview/maintenance2 chain
+/// it used to pull in on a pre-1.2 API) is core in Vulkan 1.3, which this engine requires (spec 009),
+/// so only the swapchain extension remains non-core.
+const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[ash::khr::swapchain::NAME];
+
+/// Minimum Vulkan version a physical device must report. 1.3 makes dynamic rendering a core,
+/// guaranteed-supported feature (spec 009), which is why the extension/dependency tail is gone.
+const MIN_DEVICE_API_VERSION: u32 = vk::API_VERSION_1_3;
 
 pub struct VulkanDevice {
     pub physical_device: vk::PhysicalDevice,
@@ -153,25 +150,18 @@ impl VulkanDevice {
                 continue;
             }
 
-            let mut dynamic_rendering = vk::PhysicalDeviceDynamicRenderingFeatures::default();
-            let mut features =
-                vk::PhysicalDeviceFeatures2::default().push_next(&mut dynamic_rendering);
-            let properties2 = ash::khr::get_physical_device_properties2::Instance::new(
-                &instance.entry,
-                &instance.instance,
-            );
-            unsafe { properties2.get_physical_device_features2(physical_device, &mut features) };
-            if !dynamic_rendering_supported(dynamic_rendering.dynamic_rendering) {
-                continue;
-            }
-
-            let device_type = unsafe {
+            let properties = unsafe {
                 instance
                     .instance
                     .get_physical_device_properties(physical_device)
+            };
+            // 1.3 guarantees dynamic-rendering support, so a version gate replaces the old
+            // per-device feature probe (spec 009).
+            if !meets_min_api_version(properties.api_version) {
+                continue;
             }
-            .device_type;
-            let score = Self::score_device_type(device_type);
+
+            let score = Self::score_device_type(properties.device_type);
 
             if best
                 .as_ref()
@@ -289,8 +279,9 @@ impl VulkanDevice {
     }
 }
 
-fn dynamic_rendering_supported(supported: vk::Bool32) -> bool {
-    supported == vk::TRUE
+/// True if `device_version` (a `VK_MAKE_API_VERSION`-encoded value) meets the engine's minimum.
+fn meets_min_api_version(device_version: u32) -> bool {
+    device_version >= MIN_DEVICE_API_VERSION
 }
 
 struct QueueFamilyIndices {
@@ -311,9 +302,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn requires_dynamic_rendering_feature() {
-        assert!(dynamic_rendering_supported(vk::TRUE));
-        assert!(!dynamic_rendering_supported(vk::FALSE));
+    fn requires_vulkan_1_3_or_newer() {
+        assert!(meets_min_api_version(vk::API_VERSION_1_3));
+        assert!(meets_min_api_version(vk::make_api_version(0, 1, 3, 350)));
+        assert!(meets_min_api_version(vk::make_api_version(0, 1, 4, 0)));
+        assert!(!meets_min_api_version(vk::make_api_version(0, 1, 2, 0)));
+        assert!(!meets_min_api_version(vk::make_api_version(0, 1, 1, 0)));
+        assert!(!meets_min_api_version(vk::API_VERSION_1_0));
     }
 
     #[test]

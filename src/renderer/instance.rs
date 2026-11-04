@@ -25,13 +25,11 @@ impl VulkanInstance {
             .application_version(vk::make_api_version(0, 1, 0, 0))
             .engine_name(c"M2S2 Engine")
             .engine_version(vk::make_api_version(0, 1, 0, 0))
-            .api_version(vk::API_VERSION_1_0);
+            // Vulkan 1.3: makes dynamic rendering core (spec 009). A 1.0-only loader rejects this
+            // with ERROR_INCOMPATIBLE_DRIVER, which is the intended hard requirement.
+            .api_version(vk::API_VERSION_1_3);
 
-        let mut extension_names = vec![
-            ash::khr::surface::NAME.as_ptr(),
-            // Required by the device's VK_KHR_dynamic_rendering on a 1.0-API instance.
-            ash::khr::get_physical_device_properties2::NAME.as_ptr(),
-        ];
+        let mut extension_names = vec![ash::khr::surface::NAME.as_ptr()];
 
         // Platform-specific surface extensions
         #[cfg(target_os = "windows")]

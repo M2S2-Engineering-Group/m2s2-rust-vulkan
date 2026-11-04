@@ -9,7 +9,6 @@ use crate::math::Mat4;
 use crate::renderer::buffer::Buffer;
 use crate::renderer::depth::DepthResources;
 use crate::renderer::device::VulkanDevice;
-use crate::renderer::instance::VulkanInstance;
 use crate::renderer::pipeline::{
     GraphicsPipeline, ModelPushConstants, MODEL_PUSH_OFFSET, MODEL_PUSH_STAGES,
 };
@@ -46,21 +45,11 @@ pub struct FrameContext {
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: [vk::Fence; FRAMES_IN_FLIGHT],
     current_frame: usize,
-    // vkCmdBeginRendering/EndRendering are reached through the KHR extension loader, not
-    // ash::Device: spec 001 enabled VK_KHR_dynamic_rendering on a 1.0 instance rather than
-    // requiring Vulkan 1.3 core, so the core function pointers may be null on an extension-only
-    // driver. The loader is cheap (a function-pointer table); holding it avoids rebuilding it
-    // every frame. (Signature tweak vs. the spec's `new(&VulkanDevice)` — see Outcome.)
-    dynamic_rendering: ash::khr::dynamic_rendering::Device,
     device: ash::Device, // cloned handle, kept only so Drop can destroy the fields above
 }
 
 impl FrameContext {
-    pub fn new(
-        instance: &VulkanInstance,
-        device: &VulkanDevice,
-        image_count: usize,
-    ) -> Result<Self> {
+    pub fn new(device: &VulkanDevice, image_count: usize) -> Result<Self> {
         let dev = &device.device;
 
         let pool_info = vk::CommandPoolCreateInfo::default()
@@ -79,7 +68,6 @@ impl FrameContext {
             render_finished_semaphores: Vec::new(),
             in_flight_fences: [vk::Fence::null(); FRAMES_IN_FLIGHT],
             current_frame: 0,
-            dynamic_rendering: ash::khr::dynamic_rendering::Device::new(&instance.instance, dev),
             device: dev.clone(),
         };
         let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -377,8 +365,7 @@ impl FrameContext {
                 .layer_count(1)
                 .color_attachments(&color_attachments)
                 .depth_attachment(&depth_attachment);
-            self.dynamic_rendering
-                .cmd_begin_rendering(cmd, &rendering_info);
+            dev.cmd_begin_rendering(cmd, &rendering_info);
 
             // c. Bind the pipeline and the per-frame camera descriptor set (set = 0).
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
@@ -428,7 +415,7 @@ impl FrameContext {
             }
 
             // f. End rendering.
-            self.dynamic_rendering.cmd_end_rendering(cmd);
+            dev.cmd_end_rendering(cmd);
 
             // g. COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC_KHR so the display engine can show it.
             let to_present = vk::ImageMemoryBarrier::default()
