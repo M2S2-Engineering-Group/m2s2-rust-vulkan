@@ -27,6 +27,9 @@ impl VulkanSwapchain {
         let surface_loader = ash::khr::surface::Instance::new(&instance.entry, &instance.instance);
         let swapchain_loader = swapchain::Device::new(&instance.instance, &device.device);
 
+        let surface_cleanup = super::cleanup::Cleanup::new(|| unsafe {
+            surface_loader.destroy_surface(surface, None)
+        });
         let parts = Self::build_parts(
             &swapchain_loader,
             &surface_loader,
@@ -36,6 +39,7 @@ impl VulkanSwapchain {
             vk::SwapchainKHR::null(),
         )?;
 
+        surface_cleanup.disarm();
         Ok(Self {
             swapchain_loader,
             swapchain: parts.swapchain,
@@ -102,6 +106,8 @@ impl VulkanSwapchain {
             image_count = support.capabilities.max_image_count;
         }
 
+        let families = [device.graphics_queue_family, device.present_queue_family];
+        let sharing = swapchain_sharing_mode(families);
         let create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
             .min_image_count(image_count)
@@ -110,18 +116,26 @@ impl VulkanSwapchain {
             .image_extent(extent)
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-            .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .image_sharing_mode(sharing)
             .pre_transform(support.capabilities.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
             .present_mode(present_mode)
             .clipped(true)
             .old_swapchain(old_swapchain);
 
+        let create_info = if sharing == vk::SharingMode::CONCURRENT {
+            create_info.queue_family_indices(&families)
+        } else {
+            create_info
+        };
         let swapchain = unsafe {
             swapchain_loader
                 .create_swapchain(&create_info, None)
                 .map_err(VulkanError::from)?
         };
+        let swapchain_cleanup = super::cleanup::Cleanup::new(|| unsafe {
+            swapchain_loader.destroy_swapchain(swapchain, None)
+        });
         let images = unsafe {
             swapchain_loader
                 .get_swapchain_images(swapchain)
@@ -129,6 +143,7 @@ impl VulkanSwapchain {
         };
         let image_views = Self::create_image_views(&device.device, &images, surface_format.format)?;
 
+        swapchain_cleanup.disarm();
         Ok(SwapchainParts {
             swapchain,
             images,
@@ -218,37 +233,43 @@ impl VulkanSwapchain {
         images: &[vk::Image],
         format: vk::Format,
     ) -> Result<Vec<vk::ImageView>> {
-        let mut image_views = Vec::with_capacity(images.len());
+        super::cleanup::collect_resources(
+            images.iter().copied(),
+            |image| {
+                let create_info = vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .components(vk::ComponentMapping {
+                        r: vk::ComponentSwizzle::IDENTITY,
+                        g: vk::ComponentSwizzle::IDENTITY,
+                        b: vk::ComponentSwizzle::IDENTITY,
+                        a: vk::ComponentSwizzle::IDENTITY,
+                    })
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
 
-        for &image in images {
-            let create_info = vk::ImageViewCreateInfo::default()
-                .image(image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(format)
-                .components(vk::ComponentMapping {
-                    r: vk::ComponentSwizzle::IDENTITY,
-                    g: vk::ComponentSwizzle::IDENTITY,
-                    b: vk::ComponentSwizzle::IDENTITY,
-                    a: vk::ComponentSwizzle::IDENTITY,
-                })
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
+                unsafe {
+                    device
+                        .create_image_view(&create_info, None)
+                        .map_err(VulkanError::from)
+                }
+            },
+            |view| unsafe { device.destroy_image_view(view, None) },
+        )
+    }
+}
 
-            let image_view = unsafe {
-                device
-                    .create_image_view(&create_info, None)
-                    .map_err(VulkanError::from)?
-            };
-
-            image_views.push(image_view);
-        }
-
-        Ok(image_views)
+fn swapchain_sharing_mode(families: [u32; 2]) -> vk::SharingMode {
+    if families[0] == families[1] {
+        vk::SharingMode::EXCLUSIVE
+    } else {
+        vk::SharingMode::CONCURRENT
     }
 }
 
@@ -291,6 +312,12 @@ mod tests {
             format,
             color_space,
         }
+    }
+
+    #[test]
+    fn sharing_matches_queue_families() {
+        assert_eq!(swapchain_sharing_mode([2, 2]), vk::SharingMode::EXCLUSIVE);
+        assert_eq!(swapchain_sharing_mode([2, 3]), vk::SharingMode::CONCURRENT);
     }
 
     #[test]

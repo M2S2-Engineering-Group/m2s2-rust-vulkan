@@ -79,7 +79,13 @@ impl VulkanInstance {
             unsafe { entry.create_instance(&create_info, None) }.map_err(VulkanError::from)?;
 
         #[cfg(debug_assertions)]
-        let (debug_utils, debug_messenger) = Self::setup_debug_messenger(&entry, &instance)?;
+        let (debug_utils, debug_messenger) = match Self::setup_debug_messenger(&entry, &instance) {
+            Ok(messenger) => messenger,
+            Err(error) => {
+                unsafe { instance.destroy_instance(None) };
+                return Err(error);
+            }
+        };
 
         Ok(Self {
             entry,

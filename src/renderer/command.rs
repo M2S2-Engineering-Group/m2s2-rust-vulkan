@@ -4,13 +4,16 @@
 // straight port of vulkan-tutorial.com's render-pass-based version.
 
 use crate::error::{Result, VulkanError};
+use crate::math::Mat4;
 use crate::renderer::buffer::Buffer;
 use crate::renderer::depth::DepthResources;
 use crate::renderer::device::VulkanDevice;
 use crate::renderer::instance::VulkanInstance;
-use crate::renderer::pipeline::GraphicsPipeline;
+use crate::renderer::pipeline::{
+    GraphicsPipeline, ModelPushConstants, MODEL_PUSH_OFFSET, MODEL_PUSH_STAGES,
+};
 use crate::renderer::swapchain::VulkanSwapchain;
-use crate::renderer::uniform::{UniformBufferObject, Uniforms};
+use crate::renderer::uniform::{CameraUniforms, Uniforms};
 use ash::vk;
 
 pub const FRAMES_IN_FLIGHT: usize = 2;
@@ -59,11 +62,21 @@ impl FrameContext {
                 .map_err(VulkanError::from)?
         };
 
+        let mut context = Self {
+            command_pool,
+            command_buffers: [vk::CommandBuffer::null(); FRAMES_IN_FLIGHT],
+            image_available_semaphores: [vk::Semaphore::null(); FRAMES_IN_FLIGHT],
+            render_finished_semaphores: Vec::new(),
+            in_flight_fences: [vk::Fence::null(); FRAMES_IN_FLIGHT],
+            current_frame: 0,
+            dynamic_rendering: ash::khr::dynamic_rendering::Device::new(&instance.instance, dev),
+            device: dev.clone(),
+        };
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(FRAMES_IN_FLIGHT as u32);
-        let command_buffers: [vk::CommandBuffer; FRAMES_IN_FLIGHT] = unsafe {
+        context.command_buffers = unsafe {
             dev.allocate_command_buffers(&alloc_info)
                 .map_err(VulkanError::from)?
         }
@@ -75,40 +88,29 @@ impl FrameContext {
         // immediately instead of deadlocking.
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
 
-        let mut image_available_semaphores = [vk::Semaphore::null(); FRAMES_IN_FLIGHT];
-        let mut in_flight_fences = [vk::Fence::null(); FRAMES_IN_FLIGHT];
         for i in 0..FRAMES_IN_FLIGHT {
             unsafe {
-                image_available_semaphores[i] = dev
+                context.image_available_semaphores[i] = dev
                     .create_semaphore(&semaphore_info, None)
                     .map_err(VulkanError::from)?;
-                in_flight_fences[i] = dev
+                context.in_flight_fences[i] = dev
                     .create_fence(&fence_info, None)
                     .map_err(VulkanError::from)?;
             }
         }
         // render-finished is per swapchain image (see the field comment).
-        let render_finished_semaphores = Self::create_present_semaphores(dev, image_count)?;
+        context.render_finished_semaphores = Self::create_present_semaphores(dev, image_count)?;
 
-        let dynamic_rendering = ash::khr::dynamic_rendering::Device::new(&instance.instance, dev);
-
-        Ok(Self {
-            command_pool,
-            command_buffers,
-            image_available_semaphores,
-            render_finished_semaphores,
-            in_flight_fences,
-            current_frame: 0,
-            dynamic_rendering,
-            device: dev.clone(),
-        })
+        Ok(context)
     }
 
     fn create_present_semaphores(dev: &ash::Device, count: usize) -> Result<Vec<vk::Semaphore>> {
         let info = vk::SemaphoreCreateInfo::default();
-        (0..count)
-            .map(|_| unsafe { dev.create_semaphore(&info, None).map_err(VulkanError::from) })
-            .collect()
+        super::cleanup::collect_resources(
+            0..count,
+            |_| unsafe { dev.create_semaphore(&info, None).map_err(VulkanError::from) },
+            |semaphore| unsafe { dev.destroy_semaphore(semaphore, None) },
+        )
     }
 
     /// Recreate the per-swapchain-image render-finished semaphores — the image count can change on a
@@ -118,13 +120,10 @@ impl FrameContext {
         device: &VulkanDevice,
         image_count: usize,
     ) -> Result<()> {
-        unsafe {
-            for &semaphore in &self.render_finished_semaphores {
-                device.device.destroy_semaphore(semaphore, None);
-            }
+        let replacement = Self::create_present_semaphores(&device.device, image_count)?;
+        for semaphore in std::mem::replace(&mut self.render_finished_semaphores, replacement) {
+            unsafe { device.device.destroy_semaphore(semaphore, None) };
         }
-        self.render_finished_semaphores =
-            Self::create_present_semaphores(&device.device, image_count)?;
         Ok(())
     }
 
@@ -140,7 +139,8 @@ impl FrameContext {
         uniforms: &Uniforms,
         vertex_buffer: &Buffer,
         index_buffer: &Buffer,
-        ubo: &UniformBufferObject,
+        camera: &CameraUniforms,
+        models: &[Mat4],
     ) -> Result<FrameOutcome> {
         let dev = &device.device;
         let frame = self.current_frame;
@@ -183,10 +183,10 @@ impl FrameContext {
             dev.reset_fences(&[fence]).map_err(VulkanError::from)?;
         }
 
-        // 3b. Write this frame's MVP into its uniform buffer. Safe without extra sync: the buffer is
+        // 3b. Write this frame's camera into its uniform buffer. Safe without extra sync: the buffer is
         //     per-frame-in-flight and step 1's fence wait guarantees the GPU finished the previous
         //     use of this slot.
-        uniforms.update(frame, ubo);
+        uniforms.update(frame, camera);
 
         // 4. Record the command buffer.
         self.record(
@@ -199,12 +199,13 @@ impl FrameContext {
             image_index,
             vertex_buffer,
             index_buffer,
+            models,
         )?;
 
         // 5. Submit: wait on image_available at the color-write stage, signal render_finished,
         //    and signal `fence` on completion so step 1 can reclaim this slot next cycle.
         let wait_semaphores = [image_available];
-        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let wait_stages = [acquire_wait_stage()];
         let command_buffers = [cmd];
         let signal_semaphores = [render_finished];
         let submit_info = vk::SubmitInfo::default()
@@ -263,6 +264,7 @@ impl FrameContext {
         image_index: u32,
         vertex_buffer: &Buffer,
         index_buffer: &Buffer,
+        models: &[Mat4],
     ) -> Result<()> {
         let image = swapchain.images[image_index as usize];
         let image_view = swapchain.image_views[image_index as usize];
@@ -286,7 +288,7 @@ impl FrameContext {
                 .subresource_range(color_subresource_range());
             dev.cmd_pipeline_barrier(
                 cmd,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
+                acquire_wait_stage(),
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 vk::DependencyFlags::empty(),
                 &[],
@@ -294,11 +296,14 @@ impl FrameContext {
                 &[to_color],
             );
 
-            // a2. UNDEFINED -> DEPTH_STENCIL_ATTACHMENT_OPTIMAL. old_layout UNDEFINED every frame is
-            //     fine: the depth buffer is cleared at load, so its prior contents don't matter.
+            // Discard contents, but order reuse of the shared depth image after the previous
+            // submission's early/late depth accesses (including attachment load/store).
             let to_depth = vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_access_mask(
+                    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                )
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -307,8 +312,8 @@ impl FrameContext {
                 .subresource_range(depth_subresource_range());
             dev.cmd_pipeline_barrier(
                 cmd,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                depth_stages(),
+                depth_stages(),
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],
@@ -352,7 +357,7 @@ impl FrameContext {
             self.dynamic_rendering
                 .cmd_begin_rendering(cmd, &rendering_info);
 
-            // c. Bind the pipeline and the per-frame MVP descriptor set (set = 0).
+            // c. Bind the pipeline and the per-frame camera descriptor set (set = 0).
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
             dev.cmd_bind_descriptor_sets(
                 cmd,
@@ -382,7 +387,18 @@ impl FrameContext {
             // e. Bind the vertex + index buffers and draw the indexed geometry.
             dev.cmd_bind_vertex_buffers(cmd, 0, &[vertex_buffer.buffer], &[0]);
             dev.cmd_bind_index_buffer(cmd, index_buffer.buffer, 0, vk::IndexType::UINT16);
-            dev.cmd_draw_indexed(cmd, index_buffer.len(), 1, 0, 0, 0);
+            emit_object_draws(models, index_buffer.len(), |command| match command {
+                ObjectCommand::PushModel(bytes) => dev.cmd_push_constants(
+                    cmd,
+                    pipeline.pipeline_layout,
+                    MODEL_PUSH_STAGES,
+                    MODEL_PUSH_OFFSET,
+                    bytes,
+                ),
+                ObjectCommand::DrawIndexed(index_count) => {
+                    dev.cmd_draw_indexed(cmd, index_count, 1, 0, 0, 0);
+                }
+            });
 
             // f. End rendering.
             self.dynamic_rendering.cmd_end_rendering(cmd);
@@ -412,6 +428,29 @@ impl FrameContext {
 
         Ok(())
     }
+}
+
+// One emission path for Vulkan recording and CPU tests; no per-frame command list allocation.
+enum ObjectCommand<'a> {
+    PushModel(&'a [u8]),
+    DrawIndexed(u32),
+}
+
+fn emit_object_draws(models: &[Mat4], index_count: u32, mut emit: impl FnMut(ObjectCommand<'_>)) {
+    for &model in models {
+        let constants = ModelPushConstants { model };
+        emit(ObjectCommand::PushModel(bytemuck::bytes_of(&constants)));
+        emit(ObjectCommand::DrawIndexed(index_count));
+    }
+}
+
+// The image transition's source scope must chain with the acquire semaphore wait.
+fn acquire_wait_stage() -> vk::PipelineStageFlags {
+    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+}
+
+fn depth_stages() -> vk::PipelineStageFlags {
+    vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
 }
 
 fn next_frame(current: usize) -> usize {
@@ -458,6 +497,71 @@ impl Drop for FrameContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, PartialEq)]
+    enum RecordedCommand {
+        Push(Vec<u8>),
+        Draw(u32),
+    }
+
+    fn record_objects(models: &[Mat4]) -> Vec<RecordedCommand> {
+        let mut commands = Vec::new();
+        emit_object_draws(models, 36, |command| {
+            commands.push(match command {
+                ObjectCommand::PushModel(bytes) => RecordedCommand::Push(bytes.to_vec()),
+                ObjectCommand::DrawIndexed(count) => RecordedCommand::Draw(count),
+            })
+        });
+        commands
+    }
+
+    #[test]
+    fn empty_models_emit_no_object_commands() {
+        assert!(record_objects(&[]).is_empty());
+    }
+
+    #[test]
+    fn single_model_pushes_before_drawing() {
+        let model = crate::math::translate(&crate::math::Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(
+            record_objects(&[model]),
+            vec![
+                RecordedCommand::Push(bytemuck::bytes_of(&model).to_vec()),
+                RecordedCommand::Draw(36),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_models_push_distinct_bytes_in_submission_order() {
+        let first = crate::math::translate(&crate::math::Vec3::new(1.0, 0.0, 0.0));
+        let second = crate::math::rotate(&crate::math::Vec3::new(0.0, 1.0, 0.0), 0.5);
+        assert_ne!(bytemuck::bytes_of(&first), bytemuck::bytes_of(&second));
+        assert_eq!(
+            record_objects(&[first, second]),
+            vec![
+                RecordedCommand::Push(bytemuck::bytes_of(&first).to_vec()),
+                RecordedCommand::Draw(36),
+                RecordedCommand::Push(bytemuck::bytes_of(&second).to_vec()),
+                RecordedCommand::Draw(36),
+            ]
+        );
+    }
+
+    #[test]
+    fn acquire_wait_orders_the_color_layout_transition() {
+        assert_eq!(
+            acquire_wait_stage(),
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+        );
+    }
+
+    #[test]
+    fn shared_depth_dependency_covers_early_and_late_accesses() {
+        assert!(depth_stages().contains(vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS));
+        assert!(depth_stages().contains(vk::PipelineStageFlags::LATE_FRAGMENT_TESTS));
+        assert!(!depth_stages().contains(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT));
+    }
 
     #[test]
     fn next_frame_wraps_around() {

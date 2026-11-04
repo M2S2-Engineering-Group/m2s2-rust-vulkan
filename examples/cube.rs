@@ -1,4 +1,4 @@
-use m2s2_rust_vulkan::math::{look_at, perspective, rotate, to_radians, Vec3};
+use m2s2_rust_vulkan::math::{look_at, perspective, rotate, to_radians, translate, Vec3};
 use m2s2_rust_vulkan::{init_logging, Index, Vertex, VulkanRenderer};
 use std::time::Instant;
 use winit::event::{Event, WindowEvent};
@@ -6,13 +6,16 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::WindowBuilder;
 
+// Leaves clearance between the unit cubes throughout their rotations.
+const CUBE_CENTER_OFFSET: f32 = 1.0;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
 
     log::info!("Creating window...");
     let event_loop = EventLoop::new()?;
     let window = WindowBuilder::new()
-        .with_title("M2S2 Vulkan Cube")
+        .with_title("M2S2 Vulkan Cubes")
         .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
         .build(&event_loop)?;
 
@@ -105,9 +108,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let aspect = size.width as f32 / size.height as f32;
 
-                // model: spin about the vertical axis. view/proj: a fixed camera pulled back and up.
+                // Two copies of one mesh, independently transformed under a shared camera (spec 007).
                 let angle = start.elapsed().as_secs_f32();
-                let model = rotate(&Vec3::new(0.0, 1.0, 0.0), angle);
+                let models = [
+                    translate(&Vec3::new(-CUBE_CENTER_OFFSET, 0.0, 0.0))
+                        * rotate(&Vec3::new(0.0, 1.0, 0.0), angle),
+                    translate(&Vec3::new(CUBE_CENTER_OFFSET, 0.0, -0.4))
+                        * rotate(&Vec3::new(1.0, 0.0, 0.0), -angle * 0.7),
+                ];
                 let view = look_at(
                     &Vec3::new(2.0, 2.0, 2.0),
                     &Vec3::new(0.0, 0.0, 0.0),
@@ -115,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 let proj = perspective(to_radians(45.0), aspect, 0.1, 10.0);
 
-                if let Err(e) = renderer.render_frame(model, view, proj) {
+                if let Err(e) = renderer.render_objects(&models, view, proj) {
                     log::error!("Render error: {e}");
                 }
             }

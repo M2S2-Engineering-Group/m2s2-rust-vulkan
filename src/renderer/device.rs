@@ -21,6 +21,7 @@ const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[
 
 pub struct VulkanDevice {
     pub physical_device: vk::PhysicalDevice,
+    pub(crate) max_push_constants_size: u32,
     pub device: Device,
     pub graphics_queue: vk::Queue,
     pub present_queue: vk::Queue,
@@ -39,6 +40,9 @@ impl VulkanDevice {
         let surface = instance.create_surface(display_handle, window_handle)?;
         let surface_loader = ash::khr::surface::Instance::new(&instance.entry, &instance.instance);
 
+        let _surface_cleanup = super::cleanup::Cleanup::new(|| unsafe {
+            surface_loader.destroy_surface(surface, None);
+        });
         let (physical_device, queue_families) =
             Self::pick_physical_device(instance, &surface_loader, surface)?;
 
@@ -88,16 +92,20 @@ impl VulkanDevice {
                 .map_err(VulkanError::from)?
         };
 
+        let max_push_constants_size = unsafe {
+            instance
+                .instance
+                .get_physical_device_properties(physical_device)
+        }
+        .limits
+        .max_push_constants_size;
         let graphics_queue = unsafe { device.get_device_queue(queue_families.graphics_family, 0) };
 
         let present_queue = unsafe { device.get_device_queue(queue_families.present_family, 0) };
 
-        unsafe {
-            surface_loader.destroy_surface(surface, None);
-        }
-
         Ok(Self {
             physical_device,
+            max_push_constants_size,
             device,
             graphics_queue,
             present_queue,
@@ -142,6 +150,18 @@ impl VulkanDevice {
             }
 
             if !Self::has_adequate_swapchain_support(surface_loader, physical_device, surface)? {
+                continue;
+            }
+
+            let mut dynamic_rendering = vk::PhysicalDeviceDynamicRenderingFeatures::default();
+            let mut features =
+                vk::PhysicalDeviceFeatures2::default().push_next(&mut dynamic_rendering);
+            let properties2 = ash::khr::get_physical_device_properties2::Instance::new(
+                &instance.entry,
+                &instance.instance,
+            );
+            unsafe { properties2.get_physical_device_features2(physical_device, &mut features) };
+            if !dynamic_rendering_supported(dynamic_rendering.dynamic_rendering) {
                 continue;
             }
 
@@ -269,6 +289,10 @@ impl VulkanDevice {
     }
 }
 
+fn dynamic_rendering_supported(supported: vk::Bool32) -> bool {
+    supported == vk::TRUE
+}
+
 struct QueueFamilyIndices {
     graphics_family: u32,
     present_family: u32,
@@ -285,6 +309,12 @@ impl Drop for VulkanDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requires_dynamic_rendering_feature() {
+        assert!(dynamic_rendering_supported(vk::TRUE));
+        assert!(!dynamic_rendering_supported(vk::FALSE));
+    }
 
     #[test]
     fn discrete_gpu_scores_highest() {

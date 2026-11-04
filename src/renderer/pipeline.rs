@@ -3,6 +3,7 @@
 // `extent` parameter).
 
 use crate::error::{Result, VulkanError};
+use crate::math::Mat4;
 use crate::renderer::buffer::Vertex;
 use crate::renderer::device::VulkanDevice;
 use ash::vk;
@@ -12,6 +13,34 @@ use std::io::Cursor;
 // Recompile after editing: glslc shaders/triangle.vert -o shaders/triangle.vert.spv
 const VERTEX_SHADER: &[u8] = include_bytes!("../../shaders/triangle.vert.spv");
 const FRAGMENT_SHADER: &[u8] = include_bytes!("../../shaders/triangle.frag.spv");
+
+/// Per-draw model transform, copied into command state before each indexed draw.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct ModelPushConstants {
+    pub model: Mat4,
+}
+
+pub(crate) const MODEL_PUSH_OFFSET: u32 = 0;
+pub(crate) const MODEL_PUSH_SIZE: u32 = std::mem::size_of::<ModelPushConstants>() as u32;
+pub(crate) const MODEL_PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::VERTEX;
+
+fn model_push_range() -> vk::PushConstantRange {
+    vk::PushConstantRange::default()
+        .offset(MODEL_PUSH_OFFSET)
+        .size(MODEL_PUSH_SIZE)
+        .stage_flags(MODEL_PUSH_STAGES)
+}
+
+fn validate_push_limit(limit: u32) -> Result<()> {
+    if MODEL_PUSH_OFFSET + MODEL_PUSH_SIZE > limit {
+        return Err(VulkanError::InitializationError(format!(
+            "model push constants require {} bytes, device supports {limit}",
+            MODEL_PUSH_OFFSET + MODEL_PUSH_SIZE,
+        )));
+    }
+    Ok(())
+}
 
 pub struct GraphicsPipeline {
     // pub(crate): command.rs (spec 002) needs to read these to record vkCmdBindPipeline. Not
@@ -24,7 +53,7 @@ pub struct GraphicsPipeline {
 impl GraphicsPipeline {
     /// `color_format` should be the swapchain's format (`VulkanSwapchain::format`); `depth_format`
     /// the depth attachment's (`DepthResources::format`). `descriptor_set_layout` is the per-frame
-    /// MVP uniform layout from `uniform.rs`, referenced by the pipeline layout so the shader can read
+    /// camera uniform layout from `uniform.rs`, referenced by the pipeline layout so the shader can read
     /// `set = 0`. No `extent` parameter: viewport and scissor are dynamic state, set per-frame in
     /// `command.rs` (spec 002).
     pub fn new(
@@ -33,6 +62,7 @@ impl GraphicsPipeline {
         depth_format: vk::Format,
         descriptor_set_layout: vk::DescriptorSetLayout,
     ) -> Result<Self> {
+        validate_push_limit(device.max_push_constants_size)?;
         let device = &device.device;
 
         // include_bytes! gives &[u8] with no alignment guarantee; VkShaderModuleCreateInfo wants
@@ -44,8 +74,14 @@ impl GraphicsPipeline {
             .map_err(|e| VulkanError::InitializationError(format!("bad fragment SPIR-V: {e}")))?;
 
         let vertex_module = Self::create_shader_module(device, &vertex_code)?;
+        let _vertex_cleanup = super::cleanup::Cleanup::new(|| unsafe {
+            device.destroy_shader_module(vertex_module, None)
+        });
         let fragment_module = Self::create_shader_module(device, &fragment_code)?;
 
+        let _fragment_cleanup = super::cleanup::Cleanup::new(|| unsafe {
+            device.destroy_shader_module(fragment_module, None)
+        });
         let entry_name = c"main";
         let stages = [
             vk::PipelineShaderStageCreateInfo::default()
@@ -107,9 +143,12 @@ impl GraphicsPipeline {
         let color_blending =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
 
-        // One descriptor set (set = 0): the per-frame MVP uniform block (spec 006).
+        // One descriptor set (set = 0): the per-frame camera uniform block (spec 007).
         let set_layouts = [descriptor_set_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+        let push_ranges = [model_push_range()];
+        let layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(&push_ranges);
         let pipeline_layout = unsafe {
             device
                 .create_pipeline_layout(&layout_info, None)
@@ -139,13 +178,6 @@ impl GraphicsPipeline {
         let pipeline_result = unsafe {
             device.create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
         };
-
-        // Shader modules are only needed during pipeline creation — destroy them now, regardless of
-        // whether creation succeeded.
-        unsafe {
-            device.destroy_shader_module(vertex_module, None);
-            device.destroy_shader_module(fragment_module, None);
-        }
 
         // create_graphics_pipelines reports failure as (partial pipelines, result) — clean up any
         // partial pipeline plus the layout so neither leaks before returning the error.
@@ -197,6 +229,24 @@ impl Drop for GraphicsPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_payload_and_range_match_shader_layout() {
+        assert_eq!(std::mem::size_of::<ModelPushConstants>(), 64);
+        assert_eq!(std::mem::offset_of!(ModelPushConstants, model), 0);
+        let range = model_push_range();
+        assert_eq!(range.offset, 0);
+        assert_eq!(range.size, 64);
+        assert_eq!(range.stage_flags, vk::ShaderStageFlags::VERTEX);
+    }
+
+    #[test]
+    fn push_limit_accepts_equal_or_larger_and_rejects_smaller() {
+        assert!(validate_push_limit(MODEL_PUSH_SIZE).is_ok());
+        assert!(validate_push_limit(MODEL_PUSH_SIZE + 4).is_ok());
+        assert!(validate_push_limit(MODEL_PUSH_SIZE - 4).is_err());
+        assert!(validate_push_limit(0).is_err());
+    }
 
     // SPIR-V's first word is a fixed magic number; a correctly compiled .spv always starts with it.
     const SPIRV_MAGIC: u32 = 0x0723_0203;

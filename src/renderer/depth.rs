@@ -72,41 +72,59 @@ impl DepthResources {
         };
 
         let requirements = unsafe { device.device.get_image_memory_requirements(image) };
-        let allocation = allocator.allocate(&AllocationCreateDesc {
+        let allocation_result = allocator.allocate(&AllocationCreateDesc {
             name: "depth",
             requirements,
             location: MemoryLocation::GpuOnly,
             linear: false, // OPTIMAL-tiled image
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-        })?;
-        unsafe {
-            device
-                .device
-                .bind_image_memory(image, allocation.memory(), allocation.offset())
-                .map_err(VulkanError::from)?;
-        }
-
-        // View is depth-aspect only — the combined-format fallbacks carry a stencil aspect this pass
-        // never uses.
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1),
-            );
-        let view = unsafe {
-            device
-                .device
-                .create_image_view(&view_info, None)
-                .map_err(VulkanError::from)?
+        });
+        let allocation = match allocation_result {
+            Ok(allocation) => allocation,
+            Err(error) => {
+                unsafe { device.device.destroy_image(image, None) };
+                return Err(error);
+            }
         };
+        let result = (|| {
+            unsafe {
+                device
+                    .device
+                    .bind_image_memory(image, allocation.memory(), allocation.offset())
+                    .map_err(VulkanError::from)?;
+            }
 
+            // View is depth-aspect only — the combined-format fallbacks carry a stencil aspect this pass
+            // never uses.
+            let view_info = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(format)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                        .base_mip_level(0)
+                        .level_count(1)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                );
+            let view = unsafe {
+                device
+                    .device
+                    .create_image_view(&view_info, None)
+                    .map_err(VulkanError::from)?
+            };
+
+            Ok(view)
+        })();
+        let view = match result {
+            Ok(view) => view,
+            Err(error) => {
+                unsafe { device.device.destroy_image(image, None) };
+                let _ = allocator.free(allocation);
+                return Err(error);
+            }
+        };
         Ok(Self {
             image,
             view,

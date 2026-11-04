@@ -18,7 +18,7 @@ cargo build              # build the library
 cargo build --examples   # build the examples (catches drift between lib API and example usage)
 cargo run --example window    # winit window only, no Vulkan — sanity-checks the windowing setup
 cargo run --example triangle  # minimal end-to-end: one static triangle under a fixed camera
-cargo run --example cube      # 3D: per-frame MVP uniforms, a spinning model matrix, depth testing
+cargo run --example cube      # 3D: per-frame MVP uniforms, a independent model push constants, depth testing
 cargo test                # unit tests (currently minimal — see Status)
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
@@ -120,9 +120,12 @@ are nicer, but not enough to justify redoing `instance.rs`/`device.rs`/`swapchai
   lifetime (`surface`/`surface_loader` fields) and destroys the swapchain before the surface in `Drop` —
   destroying them in the other order is a Vulkan spec violation (`VUID-vkDestroySurfaceKHR-surface-01266`)
   that the original code hit (the surface was destroyed right after creating the swapchain from it).
-- **`pipeline.rs`, `buffer.rs`, `command.rs`** — stub placeholders (`TODO`), not yet implemented.
-- **`mod.rs`** — `VulkanRenderer` composes instance → device → swapchain. `render_frame()` is currently a
-  no-op stub; `Drop` calls `wait_idle()`.
+- **`pipeline.rs`, `buffer.rs`, `command.rs`** — dynamic-rendering pipeline, staged indexed geometry,
+  command recording, frame fences, and per-image present semaphores.
+- **`mod.rs`** — `VulkanRenderer` composes Vulkan resources, draws caller-provided geometry with camera
+  uniforms and per-draw model push constants and depth testing, and handles resize/minimize. `Drop` waits for idle before ordered teardown.
+- **`depth.rs`, `uniform.rs`, `allocator.rs`** — shared synchronized depth attachment, per-frame mapped
+  uniforms/descriptors, and GPU suballocation. Private `cleanup.rs` provides constructor rollback helpers.
 
 **Window handles, not window ownership**: `VulkanRenderer::new`, `VulkanDevice::new`, and
 `VulkanSwapchain::new` take `RawDisplayHandle` + `RawWindowHandle` (from `raw-window-handle`, a direct
@@ -160,13 +163,11 @@ D3D conventions (`_rh_no`, `_lh_zo`, etc.) that this layer does not surface.
   a Linux surface extension, removed the stale `MATH_TODO.md`, and added unit tests for the pure logic in
   `device.rs`/`swapchain.rs`/`error.rs`/`math.rs` (13 tests total, up from 1).
 
-### Not yet done
-Tracked informally in `README.md`'s "Next Steps" and `LEARNING_PATH.md`; the stub files under `src/renderer/`
-are the concrete markers:
-- Graphics pipeline creation (`pipeline.rs`)
-- Vertex/index buffer management (`buffer.rs`)
-- Command pool + command buffer management (`command.rs`)
-- An actual render loop — `render_frame()` is a no-op; acquiring an image, recording/submitting a command
-  buffer, and presenting are all unimplemented
-- Swapchain recreation on window resize (the `triangle.rs` resize handler is a `TODO`)
-- Shader loading/SPIR-V compilation
+### Current rendering status
+
+Phase 1 and Phase 2 depth/uniform/camera support are implemented, including `examples/cube.rs`.
+`ROADMAP.md` tracks remaining features. See [REVIEW_NOTES.md](REVIEW_NOTES.md) for the correctness audit,
+its fixes and verification limits. [Spec 007](specs/007-multiple-objects-and-push-constants.md) implements
+multiple independently transformed copies of one mesh using push constants. `render_objects` accepts a
+model slice; `render_frame` remains a single-object compatibility wrapper. [Spec 008](specs/008-diagnostic-text-overlay.md)
+proposes a diagnostic text overlay and remains a draft.

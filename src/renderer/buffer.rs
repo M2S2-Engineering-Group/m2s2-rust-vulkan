@@ -83,27 +83,29 @@ impl Buffer {
             .expect("CpuToGpu allocation is host-visible and mapped")[..bytes.len()]
             .copy_from_slice(bytes);
 
-        // Device-local destination (also a transfer target).
-        let (buffer, allocation) = create_buffer(
-            device,
-            allocator,
-            size,
-            usage | vk::BufferUsageFlags::TRANSFER_DST,
-            MemoryLocation::GpuOnly,
-            "device-local",
-        )?;
-
-        copy_buffer(device, staging, buffer, size)?;
-
-        // Staging is transient — free it now that the copy has completed.
+        let result = (|| {
+            let (buffer, allocation) = create_buffer(
+                device,
+                allocator,
+                size,
+                usage | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuOnly,
+                "device-local",
+            )?;
+            if let Err(error) = copy_buffer(device, staging, buffer, size) {
+                unsafe { device.device.destroy_buffer(buffer, None) };
+                let _ = allocator.free(allocation);
+                return Err(error);
+            }
+            Ok(Self {
+                buffer,
+                allocation: Some(allocation),
+                len: data.len() as u32,
+            })
+        })();
         unsafe { device.device.destroy_buffer(staging, None) };
-        allocator.free(staging_alloc)?;
-
-        Ok(Self {
-            buffer,
-            allocation: Some(allocation),
-            len: data.len() as u32,
-        })
+        let _ = allocator.free(staging_alloc);
+        result
     }
 
     /// Create a `HOST_VISIBLE` buffer that gpu-allocator keeps persistently mapped, for data the CPU
@@ -181,18 +183,29 @@ fn create_buffer(
             .map_err(VulkanError::from)?
     };
     let requirements = unsafe { device.device.get_buffer_memory_requirements(buffer) };
-    let allocation = allocator.allocate(&AllocationCreateDesc {
+    let allocation_result = allocator.allocate(&AllocationCreateDesc {
         name,
         requirements,
         location,
         linear: true, // buffers are always linear
         allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-    })?;
-    unsafe {
+    });
+    let allocation = match allocation_result {
+        Ok(allocation) => allocation,
+        Err(error) => {
+            unsafe { device.device.destroy_buffer(buffer, None) };
+            return Err(error);
+        }
+    };
+    let binding = unsafe {
         device
             .device
             .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
-            .map_err(VulkanError::from)?;
+    };
+    if let Err(error) = binding {
+        unsafe { device.device.destroy_buffer(buffer, None) };
+        let _ = allocator.free(allocation);
+        return Err(error.into());
     }
     Ok((buffer, allocation))
 }
@@ -208,6 +221,8 @@ fn copy_buffer(device: &VulkanDevice, src: vk::Buffer, dst: vk::Buffer, size: u6
         dev.create_command_pool(&pool_info, None)
             .map_err(VulkanError::from)?
     };
+    let _pool_cleanup =
+        super::cleanup::Cleanup::new(|| unsafe { dev.destroy_command_pool(pool, None) });
     let alloc_info = vk::CommandBufferAllocateInfo::default()
         .command_pool(pool)
         .level(vk::CommandBufferLevel::PRIMARY)
@@ -232,12 +247,11 @@ fn copy_buffer(device: &VulkanDevice, src: vk::Buffer, dst: vk::Buffer, size: u6
         let fence = dev
             .create_fence(&vk::FenceCreateInfo::default(), None)
             .map_err(VulkanError::from)?;
+        let _fence_cleanup = super::cleanup::Cleanup::new(|| dev.destroy_fence(fence, None));
         dev.queue_submit(device.graphics_queue, &[submit], fence)
             .map_err(VulkanError::from)?;
         dev.wait_for_fences(&[fence], true, u64::MAX)
             .map_err(VulkanError::from)?;
-        dev.destroy_fence(fence, None);
-        dev.destroy_command_pool(pool, None);
     }
     Ok(())
 }

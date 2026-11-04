@@ -1,6 +1,6 @@
-// Per-frame uniform buffers + descriptor sets: the MVP matrices reaching the vertex shader. One
+// Per-frame uniform buffers + descriptor sets: the camera matrices reaching the vertex shader. One
 // uniform buffer and one descriptor set PER FRAME-IN-FLIGHT, so the CPU can rewrite frame N's copy
-// while the GPU still reads frame N-1's. See specs/006-uniforms-depth-camera.md.
+// while the GPU still reads frame N-1's. See specs/007-multiple-objects-and-push-constants.md.
 
 use crate::error::{Result, VulkanError};
 use crate::math::Mat4;
@@ -10,14 +10,11 @@ use crate::renderer::command::FRAMES_IN_FLIGHT;
 use crate::renderer::device::VulkanDevice;
 use ash::vk;
 
-/// The shader-visible uniform block: model/view/proj kept separate (not a pre-multiplied MVP) so the
-/// simulation side produces a world-space model matrix without knowing the camera. `#[repr(C)]` +
-/// `Pod` so it uploads byte-for-byte; three `mat4`s are naturally std140-compatible (each 64 bytes,
-/// 16-byte aligned, no padding).
+/// Per-frame view/projection matrices. Two tightly packed row-major mat4 values match
+/// the shader's std140 camera block; model transforms use push constants (spec 007).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct UniformBufferObject {
-    pub model: Mat4,
+pub(crate) struct CameraUniforms {
     pub view: Mat4,
     pub proj: Mat4,
 }
@@ -51,6 +48,9 @@ impl Uniforms {
                 .map_err(VulkanError::from)?
         };
 
+        let layout_cleanup = super::cleanup::Cleanup::new(|| unsafe {
+            dev.destroy_descriptor_set_layout(descriptor_set_layout, None)
+        });
         // Pool sized for exactly one set (one uniform buffer) per frame-in-flight.
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::UNIFORM_BUFFER)
@@ -63,18 +63,30 @@ impl Uniforms {
                 .map_err(VulkanError::from)?
         };
 
+        let pool_cleanup = super::cleanup::Cleanup::new(|| unsafe {
+            dev.destroy_descriptor_pool(descriptor_pool, None)
+        });
         // One host-visible mapped buffer per frame-in-flight, each big enough for one UBO.
-        let size = std::mem::size_of::<UniformBufferObject>() as u64;
+        let size = std::mem::size_of::<CameraUniforms>() as u64;
         let mut buffers_vec = Vec::with_capacity(FRAMES_IN_FLIGHT);
         for _ in 0..FRAMES_IN_FLIGHT {
-            buffers_vec.push(Buffer::new_host_visible_mapped(
+            let buffer = Buffer::new_host_visible_mapped(
                 device,
                 allocator,
                 size,
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
-            )?);
+            );
+            match buffer {
+                Ok(buffer) => buffers_vec.push(buffer),
+                Err(error) => {
+                    for buffer in &mut buffers_vec {
+                        buffer.destroy(device, allocator);
+                    }
+                    return Err(error);
+                }
+            }
         }
-        let buffers: [Buffer; FRAMES_IN_FLIGHT] = buffers_vec
+        let mut buffers: [Buffer; FRAMES_IN_FLIGHT] = buffers_vec
             .try_into()
             .unwrap_or_else(|_| unreachable!("pushed exactly FRAMES_IN_FLIGHT buffers"));
 
@@ -83,12 +95,18 @@ impl Uniforms {
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(descriptor_pool)
             .set_layouts(&set_layouts);
-        let descriptor_sets: [vk::DescriptorSet; FRAMES_IN_FLIGHT] = unsafe {
-            dev.allocate_descriptor_sets(&alloc_info)
-                .map_err(VulkanError::from)?
-        }
-        .try_into()
-        .expect("allocate_descriptor_sets returns FRAMES_IN_FLIGHT sets");
+        let sets = match unsafe { dev.allocate_descriptor_sets(&alloc_info) } {
+            Ok(sets) => sets,
+            Err(error) => {
+                for buffer in &mut buffers {
+                    buffer.destroy(device, allocator);
+                }
+                return Err(error.into());
+            }
+        };
+        let descriptor_sets: [vk::DescriptorSet; FRAMES_IN_FLIGHT] = sets
+            .try_into()
+            .expect("allocate_descriptor_sets returns FRAMES_IN_FLIGHT sets");
 
         for i in 0..FRAMES_IN_FLIGHT {
             let buffer_info = [vk::DescriptorBufferInfo::default()
@@ -104,6 +122,8 @@ impl Uniforms {
             unsafe { dev.update_descriptor_sets(&[write], &[]) };
         }
 
+        pool_cleanup.disarm();
+        layout_cleanup.disarm();
         Ok(Self {
             descriptor_set_layout,
             descriptor_pool,
@@ -114,7 +134,7 @@ impl Uniforms {
 
     /// Write `ubo` into frame `frame`'s mapped uniform buffer. The caller must have waited on that
     /// frame's in-flight fence first (the render loop does), so the GPU isn't mid-read.
-    pub(crate) fn update(&self, frame: usize, ubo: &UniformBufferObject) {
+    pub(crate) fn update(&self, frame: usize, ubo: &CameraUniforms) {
         self.buffers[frame].write_mapped(bytemuck::bytes_of(ubo));
     }
 
@@ -148,9 +168,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uniform_buffer_object_is_three_tightly_packed_mat4s() {
-        // Three mat4 (64 bytes each), no padding — guards the std140 layout assumption and catches
-        // an accidental field-type change.
-        assert_eq!(std::mem::size_of::<UniformBufferObject>(), 3 * 64);
+    fn camera_uniforms_match_shader_layout() {
+        assert_eq!(std::mem::size_of::<CameraUniforms>(), 128);
+        assert_eq!(std::mem::offset_of!(CameraUniforms, view), 0);
+        assert_eq!(std::mem::offset_of!(CameraUniforms, proj), 64);
     }
 }

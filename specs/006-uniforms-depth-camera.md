@@ -238,3 +238,9 @@ resize (exercising depth-image recreation) with **zero validation errors/warning
 the spinning cube (orientation, occlusion, colors) is left to a human with the window on screen — a headless
 session can't observe rendered pixels, only that the GPU work is validation-clean. If the cube looks
 mirrored or inside-out on a given setup, the `(1,1)` flip and the front-face winding are the two knobs.
+
+### Follow-up correctness review
+
+The pre-007 review corrected shared-depth synchronization, depth replacement on allocation failure,
+and initial depth sizing from the selected swapchain extent. See [REVIEW_NOTES.md](../REVIEW_NOTES.md)
+for those fixes, the related initialization audit, runtime findings, and verification limits.

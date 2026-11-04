@@ -19,8 +19,8 @@ on to Phase 1.
 
 ## Phase 1: Core render loop
 
-The minimum an engine needs to put anything on screen at all. This is what `pipeline.rs`, `buffer.rs`, and
-`command.rs` are stubbed out for.
+The minimum an engine needs to put anything on screen at all. This is implemented across `pipeline.rs`, `buffer.rs`, and
+`command.rs`.
 
 - [x] **Shader pipeline**: GLSL compiled offline to SPIR-V via `glslc`, committed to `shaders/*.spv`, loaded
       via `include_bytes!` + `ash::util::read_spv` — see
@@ -52,12 +52,13 @@ The minimum an engine needs to put anything on screen at all. This is what `pipe
 What separates "a triangle renders" from "a usable rendering engine" for simple 3D scenes.
 
 - [x] **Depth buffer** and depth testing — see [specs/006-uniforms-depth-camera.md](specs/006-uniforms-depth-camera.md)
-- [x] **Uniform buffers & descriptor sets**: per-frame MVP matrices via `m2s2-math` — see [specs/006](specs/006-uniforms-depth-camera.md)
-- [ ] **Push constants** for small, frequently-updated per-draw data
+- [x] **Uniform buffers & descriptor sets**: per-frame camera matrices (model transforms use push constants) via `m2s2-math` — see [specs/006](specs/006-uniforms-depth-camera.md)
+- [x] **Push constants** for small, frequently-updated per-draw data — [spec 007](specs/007-multiple-objects-and-push-constants.md)
 - [x] **Camera**: view/projection using `src/math.rs`'s existing `perspective`/`look_at` — see [specs/006](specs/006-uniforms-depth-camera.md)
 - [ ] **Textures**: image loading, `VkImage`/`VkImageView` creation, layout transitions, samplers, mipmaps
-- [ ] **Multiple draw calls / basic instancing**: more than one object per frame without one pipeline per
-      object
+- [x] **Multiple draw calls**: independently transformed copies of one mesh through one pipeline — [spec 007](specs/007-multiple-objects-and-push-constants.md)
+- [ ] **Basic instancing**: deferred; 007 issues separate indexed draws
+- [ ] **Diagnostic text overlay**: camera position, FPS/CPU frame interval, device and swapchain state — [draft spec 008](specs/008-diagnostic-text-overlay.md); reuse texture upload support
 - [ ] **Basic lighting**: Phong/Blinn-Phong (ambient + diffuse + specular), normals, one or more point/
       directional lights
 
