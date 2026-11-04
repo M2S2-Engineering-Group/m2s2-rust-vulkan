@@ -17,7 +17,8 @@ It depends on `m2s2-math` (linear algebra: vectors, matrices, quaternions), publ
 cargo build              # build the library
 cargo build --examples   # build the examples (catches drift between lib API and example usage)
 cargo run --example window    # winit window only, no Vulkan — sanity-checks the windowing setup
-cargo run --example triangle  # Vulkan instance/device/swapchain init + render loop stub
+cargo run --example triangle  # minimal end-to-end: one static triangle under a fixed camera
+cargo run --example cube      # 3D: per-frame MVP uniforms, a spinning model matrix, depth testing
 cargo test                # unit tests (currently minimal — see Status)
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
