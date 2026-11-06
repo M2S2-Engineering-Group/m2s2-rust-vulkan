@@ -54,21 +54,28 @@ impl StoredTexture {
         let mut image =
             SampledImage::new_rgba8_srgb(device, allocator, vk::Extent2D { width, height }, rgba8)?;
         let dev = &device.device;
-        // Allocate the descriptor pool/set after the image. On any error here the image is already
-        // owned, so destroy it before returning so nothing leaks.
-        let result = (|| {
-            let sizes = [vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1)];
-            let pool = unsafe {
-                dev.create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo::default()
-                        .max_sets(1)
-                        .pool_sizes(&sizes),
-                    None,
-                )
+        // Pool is created outside the allocate/write closure below so its handle is available to
+        // the error arm: if allocation or the descriptor write fails, the pool must still be
+        // destroyed (it would otherwise leak — nothing else owns it at that point) before the
+        // image is torn down.
+        let sizes = [vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)];
+        let pool = match unsafe {
+            dev.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(1)
+                    .pool_sizes(&sizes),
+                None,
+            )
+        } {
+            Ok(pool) => pool,
+            Err(error) => {
+                image.destroy(device, allocator);
+                return Err(VulkanError::from(error));
             }
-            .map_err(VulkanError::from)?;
+        };
+        let result = (|| {
             let set = unsafe {
                 dev.allocate_descriptor_sets(
                     &vk::DescriptorSetAllocateInfo::default()
@@ -91,11 +98,12 @@ impl StoredTexture {
                     &[],
                 )
             };
-            Ok((pool, set))
+            Ok(set)
         })();
         match result {
-            Ok((pool, set)) => Ok(Self { image, pool, set }),
+            Ok(set) => Ok(Self { image, pool, set }),
             Err(error) => {
+                unsafe { dev.destroy_descriptor_pool(pool, None) };
                 image.destroy(device, allocator);
                 Err(error)
             }
