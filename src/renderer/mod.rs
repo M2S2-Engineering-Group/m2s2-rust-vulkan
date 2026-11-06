@@ -356,6 +356,28 @@ impl VulkanRenderer {
         }
         Ok(())
     }
+
+    /// Upload an RGBA8 image (`rgba8.len() == width * height * 4`, both non-zero) into a new
+    /// renderer-owned texture, returning its handle. The texture is freed when the renderer drops.
+    pub fn create_texture(
+        &mut self,
+        rgba8: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<texture::TextureId> {
+        let stored = StoredTexture::new(
+            &self.device,
+            &mut self.allocator,
+            self.texture_set_layout,
+            rgba8,
+            width,
+            height,
+        )?;
+        let id = texture::TextureId(self.textures.len());
+        self.texture_sets.push(stored.set);
+        self.textures.push(stored);
+        Ok(id)
+    }
 }
 
 impl Drop for VulkanRenderer {

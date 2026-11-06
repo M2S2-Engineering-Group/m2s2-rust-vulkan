@@ -90,6 +90,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &indices,
     )?;
 
+    // Two 2x2 RGBA8 textures: a red/white checker and a blue/green checker.
+    fn checker(a: [u8; 4], b: [u8; 4]) -> [u8; 16] {
+        let mut px = [0u8; 16];
+        for (i, color) in [a, b, b, a].into_iter().enumerate() {
+            px[i * 4..i * 4 + 4].copy_from_slice(&color);
+        }
+        px
+    }
+    let tex_a = renderer
+        .create_texture(&checker([255, 40, 40, 255], [255, 255, 255, 255]), 2, 2)
+        .expect("create texture A");
+    let tex_b = renderer
+        .create_texture(&checker([40, 80, 255, 255], [40, 255, 120, 255]), 2, 2)
+        .expect("create texture B");
+
     // The "simulation" side: a start time the cube's model matrix spins off of. This is what a game
     // engine's update step would own; the renderer only receives the resulting matrices (spec 006).
     let start = Instant::now();
@@ -147,11 +162,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let objects = [
                     Object {
                         model: models[0],
-                        texture: None,
+                        texture: Some(tex_a),
                     },
                     Object {
                         model: models[1],
-                        texture: None,
+                        texture: Some(tex_b),
                     },
                 ];
                 let camera_position = Vec3::new(2.0, 2.0, 2.0);
