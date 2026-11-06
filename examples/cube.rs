@@ -1,7 +1,9 @@
 use m2s2_rust_vulkan::math::{
     look_at, perspective, rotate, to_radians, translate, Vec2, Vec3, Vec4,
 };
-use m2s2_rust_vulkan::{init_logging, Diagnostics, Index, TextDraw, Vertex, VulkanRenderer};
+use m2s2_rust_vulkan::{
+    init_logging, Diagnostics, Index, Object, TextDraw, Vertex, VulkanRenderer,
+};
 use std::time::Instant;
 use winit::event::{ElementState, Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -142,6 +144,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     translate(&Vec3::new(CUBE_CENTER_OFFSET, 0.0, -0.4))
                         * rotate(&Vec3::new(1.0, 0.0, 0.0), -angle * 0.7),
                 ];
+                let objects = [
+                    Object {
+                        model: models[0],
+                        texture: None,
+                    },
+                    Object {
+                        model: models[1],
+                        texture: None,
+                    },
+                ];
                 let camera_position = Vec3::new(2.0, 2.0, 2.0);
                 let view = look_at(
                     &camera_position,
@@ -158,7 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     color: Vec4::new(1.0, 1.0, 1.0, 1.0),
                 }];
                 let text = if show_diagnostics { &text[..] } else { &[] };
-                if let Err(e) = renderer.render_objects_with_text(&models, view, proj, text) {
+                if let Err(e) = renderer.render_objects_with_text(&objects, view, proj, text) {
                     log::error!("Render error: {e}");
                     elwt.exit();
                 }

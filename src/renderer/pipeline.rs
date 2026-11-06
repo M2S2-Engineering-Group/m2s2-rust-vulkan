@@ -63,22 +63,23 @@ pub struct GraphicsPipeline {
 
 impl GraphicsPipeline {
     /// `color_format` should be the swapchain's format (`VulkanSwapchain::format`); `depth_format`
-    /// the depth attachment's (`DepthResources::format`). `descriptor_set_layout` is the per-frame
-    /// camera uniform layout from `uniform.rs`, referenced by the pipeline layout so the shader can read
-    /// `set = 0`. No `extent` parameter: viewport and scissor are dynamic state, set per-frame in
-    /// `command.rs` (spec 002).
+    /// the depth attachment's (`DepthResources::format`). `set_layouts` are referenced by the
+    /// pipeline layout in order, so the shader can read `set = 0`, `set = 1`, etc. (the per-frame
+    /// camera uniform layout from `uniform.rs`, then the per-object texture layout from
+    /// `texture.rs`). No `extent` parameter: viewport and scissor are dynamic state, set per-frame
+    /// in `command.rs` (spec 002).
     pub fn new(
         device: &VulkanDevice,
         color_format: vk::Format,
         depth_format: vk::Format,
-        descriptor_set_layout: vk::DescriptorSetLayout,
+        set_layouts: &[vk::DescriptorSetLayout],
     ) -> Result<Self> {
         validate_push_limit(device.max_push_constants_size)?;
         Self::create(
             device,
             color_format,
             depth_format,
-            descriptor_set_layout,
+            set_layouts,
             PipelineDescription {
                 vertex_shader: VERTEX_SHADER,
                 fragment_shader: FRAGMENT_SHADER,
@@ -96,7 +97,7 @@ impl GraphicsPipeline {
         device: &VulkanDevice,
         color_format: vk::Format,
         depth_format: vk::Format,
-        descriptor_set_layout: vk::DescriptorSetLayout,
+        set_layouts: &[vk::DescriptorSetLayout],
         description: PipelineDescription<'_>,
     ) -> Result<Self> {
         let device = &device.device;
@@ -184,10 +185,10 @@ impl GraphicsPipeline {
         let color_blending =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
 
-        // Set 0 contains the camera UBO for scene geometry or the sampled font atlas for text.
-        let set_layouts = [descriptor_set_layout];
+        // Set 0 contains the camera UBO for scene geometry or the sampled font atlas for text;
+        // scene geometry also has a set 1 per-object texture.
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&set_layouts)
+            .set_layouts(set_layouts)
             .push_constant_ranges(description.push_ranges);
         let pipeline_layout = unsafe {
             device

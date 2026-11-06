@@ -4,8 +4,8 @@
 // straight port of vulkan-tutorial.com's render-pass-based version.
 
 use super::text::{TextRenderer, TextVertex};
+use super::texture::{resolve_texture_set, Object};
 use crate::error::{Result, VulkanError};
-use crate::math::Mat4;
 use crate::renderer::buffer::Buffer;
 use crate::renderer::depth::DepthResources;
 use crate::renderer::device::VulkanDevice;
@@ -138,7 +138,9 @@ impl FrameContext {
         vertex_buffer: &Buffer,
         index_buffer: &Buffer,
         camera: &CameraUniforms,
-        models: &[Mat4],
+        objects: &[Object],
+        texture_sets: &[vk::DescriptorSet],
+        white_set: vk::DescriptorSet,
         text: Option<&TextRenderer>,
         text_vertices: &[TextVertex],
     ) -> Result<FrameOutcome> {
@@ -204,7 +206,9 @@ impl FrameContext {
             image_index,
             vertex_buffer,
             index_buffer,
-            models,
+            objects,
+            texture_sets,
+            white_set,
             text,
             frame,
             text_vertices.len() as u32,
@@ -272,7 +276,9 @@ impl FrameContext {
         image_index: u32,
         vertex_buffer: &Buffer,
         index_buffer: &Buffer,
-        models: &[Mat4],
+        objects: &[Object],
+        texture_sets: &[vk::DescriptorSet],
+        white_set: vk::DescriptorSet,
         text: Option<&TextRenderer>,
         frame: usize,
         text_vertex_count: u32,
@@ -397,18 +403,32 @@ impl FrameContext {
             // e. Bind the vertex + index buffers and draw the indexed geometry.
             dev.cmd_bind_vertex_buffers(cmd, 0, &[vertex_buffer.buffer], &[0]);
             dev.cmd_bind_index_buffer(cmd, index_buffer.buffer, 0, vk::IndexType::UINT16);
-            emit_object_draws(models, index_buffer.len(), |command| match command {
-                ObjectCommand::PushModel(bytes) => dev.cmd_push_constants(
-                    cmd,
-                    pipeline.pipeline_layout,
-                    MODEL_PUSH_STAGES,
-                    MODEL_PUSH_OFFSET,
-                    bytes,
-                ),
-                ObjectCommand::DrawIndexed(index_count) => {
-                    dev.cmd_draw_indexed(cmd, index_count, 1, 0, 0, 0);
-                }
-            });
+            emit_object_draws(
+                objects,
+                index_buffer.len(),
+                texture_sets,
+                white_set,
+                |command| match command {
+                    ObjectCommand::BindTexture(set) => dev.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        pipeline.pipeline_layout,
+                        1,
+                        &[set],
+                        &[],
+                    ),
+                    ObjectCommand::PushModel(bytes) => dev.cmd_push_constants(
+                        cmd,
+                        pipeline.pipeline_layout,
+                        MODEL_PUSH_STAGES,
+                        MODEL_PUSH_OFFSET,
+                        bytes,
+                    ),
+                    ObjectCommand::DrawIndexed(index_count) => {
+                        dev.cmd_draw_indexed(cmd, index_count, 1, 0, 0, 0);
+                    }
+                },
+            );
 
             if let Some(text) = text {
                 text.record(dev, cmd, frame, text_vertex_count);
@@ -446,13 +466,24 @@ impl FrameContext {
 
 // One emission path for Vulkan recording and CPU tests; no per-frame command list allocation.
 enum ObjectCommand<'a> {
+    BindTexture(vk::DescriptorSet),
     PushModel(&'a [u8]),
     DrawIndexed(u32),
 }
 
-fn emit_object_draws(models: &[Mat4], index_count: u32, mut emit: impl FnMut(ObjectCommand<'_>)) {
-    for &model in models {
-        let constants = ModelPushConstants { model };
+fn emit_object_draws(
+    objects: &[Object],
+    index_count: u32,
+    texture_sets: &[vk::DescriptorSet],
+    white_set: vk::DescriptorSet,
+    mut emit: impl FnMut(ObjectCommand<'_>),
+) {
+    for object in objects {
+        let set = resolve_texture_set(object.texture, texture_sets, white_set);
+        emit(ObjectCommand::BindTexture(set));
+        let constants = ModelPushConstants {
+            model: object.model,
+        };
         emit(ObjectCommand::PushModel(bytemuck::bytes_of(&constants)));
         emit(ObjectCommand::DrawIndexed(index_count));
     }
@@ -511,17 +542,28 @@ impl Drop for FrameContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ash::vk::Handle;
 
     #[derive(Debug, PartialEq)]
     enum RecordedCommand {
+        Bind(vk::DescriptorSet),
         Push(Vec<u8>),
         Draw(u32),
     }
 
-    fn record_objects(models: &[Mat4]) -> Vec<RecordedCommand> {
+    fn set(raw: u64) -> vk::DescriptorSet {
+        vk::DescriptorSet::from_raw(raw)
+    }
+
+    fn record_objects(
+        objects: &[Object],
+        sets: &[vk::DescriptorSet],
+        white: vk::DescriptorSet,
+    ) -> Vec<RecordedCommand> {
         let mut commands = Vec::new();
-        emit_object_draws(models, 36, |command| {
+        emit_object_draws(objects, 36, sets, white, |command| {
             commands.push(match command {
+                ObjectCommand::BindTexture(s) => RecordedCommand::Bind(s),
                 ObjectCommand::PushModel(bytes) => RecordedCommand::Push(bytes.to_vec()),
                 ObjectCommand::DrawIndexed(count) => RecordedCommand::Draw(count),
             })
@@ -530,33 +572,38 @@ mod tests {
     }
 
     #[test]
-    fn empty_models_emit_no_object_commands() {
-        assert!(record_objects(&[]).is_empty());
+    fn empty_objects_emit_no_commands() {
+        assert!(record_objects(&[], &[set(0xA0)], set(0x10)).is_empty());
     }
 
     #[test]
-    fn single_model_pushes_before_drawing() {
-        let model = crate::math::translate(&crate::math::Vec3::new(1.0, 2.0, 3.0));
+    fn mixed_objects_bind_resolved_set_then_push_then_draw_in_order() {
+        let white = set(0x10);
+        let sets = [set(0xA0), set(0xB0)];
+        let m0 = crate::math::translate(&crate::math::Vec3::new(1.0, 0.0, 0.0));
+        let m1 = crate::math::rotate(&crate::math::Vec3::new(0.0, 1.0, 0.0), 0.5);
+        let objects = [
+            Object {
+                model: m0,
+                texture: None,
+            },
+            Object {
+                model: m1,
+                texture: Some(crate::renderer::texture::TextureId(1)),
+            },
+        ];
         assert_eq!(
-            record_objects(&[model]),
+            record_objects(&objects, &sets, white),
             vec![
-                RecordedCommand::Push(bytemuck::bytes_of(&model).to_vec()),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Push(
+                    bytemuck::bytes_of(&ModelPushConstants { model: m0 }).to_vec()
+                ),
                 RecordedCommand::Draw(36),
-            ]
-        );
-    }
-
-    #[test]
-    fn two_models_push_distinct_bytes_in_submission_order() {
-        let first = crate::math::translate(&crate::math::Vec3::new(1.0, 0.0, 0.0));
-        let second = crate::math::rotate(&crate::math::Vec3::new(0.0, 1.0, 0.0), 0.5);
-        assert_ne!(bytemuck::bytes_of(&first), bytemuck::bytes_of(&second));
-        assert_eq!(
-            record_objects(&[first, second]),
-            vec![
-                RecordedCommand::Push(bytemuck::bytes_of(&first).to_vec()),
-                RecordedCommand::Draw(36),
-                RecordedCommand::Push(bytemuck::bytes_of(&second).to_vec()),
+                RecordedCommand::Bind(sets[1]),
+                RecordedCommand::Push(
+                    bytemuck::bytes_of(&ModelPushConstants { model: m1 }).to_vec()
+                ),
                 RecordedCommand::Draw(36),
             ]
         );

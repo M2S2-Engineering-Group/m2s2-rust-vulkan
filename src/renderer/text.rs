@@ -167,7 +167,7 @@ fn text_pipeline(
         device,
         color,
         depth,
-        layout,
+        &[layout],
         PipelineDescription {
             vertex_shader: include_bytes!("../../shaders/text.vert.spv"),
             fragment_shader: include_bytes!("../../shaders/text.frag.spv"),

@@ -10,6 +10,7 @@ pub mod instance;
 pub mod pipeline;
 pub mod swapchain;
 pub mod text;
+pub mod texture;
 pub mod uniform;
 mod upload;
 
@@ -18,6 +19,7 @@ use crate::math::Mat4;
 use ash::vk;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::mem::ManuallyDrop;
+use texture::{Object, StoredTexture};
 
 pub struct VulkanRenderer {
     // `ManuallyDrop` and torn down explicitly in `Drop`, in swapchain -> device -> instance
@@ -44,6 +46,11 @@ pub struct VulkanRenderer {
     // `depth` is also recreated on resize (it's swapchain-extent-sized); `uniforms` is not.
     pub(crate) uniforms: uniform::Uniforms,
     pub(crate) depth: depth::DepthResources,
+    pub(crate) texture_set_layout: vk::DescriptorSetLayout,
+    pub(crate) white_texture: StoredTexture,
+    pub(crate) white_set: vk::DescriptorSet,
+    pub(crate) textures: Vec<StoredTexture>,
+    pub(crate) texture_sets: Vec<vk::DescriptorSet>,
     pub allocator: ManuallyDrop<allocator::Allocator>,
     // A pending resize target in physical pixels; the next `render_frame` recreates the swapchain to
     // it. Set by `resize` and by an out-of-date frame. `None` = nothing pending.
@@ -85,6 +92,8 @@ impl VulkanRenderer {
         let mut index_buffer = None;
         let mut depth = None;
         let mut uniforms = None;
+        let mut texture_set_layout = None;
+        let mut white_texture = None;
         let resources = (|| {
             vertex_buffer = Some(buffer::Buffer::new_device_local(
                 &device,
@@ -109,11 +118,22 @@ impl VulkanRenderer {
             )?);
             uniforms = Some(uniform::Uniforms::new(&device, &mut allocator)?);
 
+            let layout = texture::create_set_layout(&device)?;
+            texture_set_layout = Some(layout);
+            white_texture = Some(StoredTexture::new(
+                &device,
+                &mut allocator,
+                layout,
+                &[255, 255, 255, 255],
+                1,
+                1,
+            )?);
+
             let pipeline = pipeline::GraphicsPipeline::new(
                 &device,
                 swapchain.format,
                 depth.as_ref().unwrap().format(),
-                uniforms.as_ref().unwrap().descriptor_set_layout(),
+                &[uniforms.as_ref().unwrap().descriptor_set_layout(), layout],
             )?;
             let frame_context = command::FrameContext::new(&device, swapchain.images.len())?;
 
@@ -122,6 +142,12 @@ impl VulkanRenderer {
         let (pipeline, frame_context) = match resources {
             Ok(resources) => resources,
             Err(error) => {
+                if let Some(mut resource) = white_texture.take() {
+                    resource.destroy(&device, &mut allocator);
+                }
+                if let Some(layout) = texture_set_layout.take() {
+                    unsafe { device.device.destroy_descriptor_set_layout(layout, None) };
+                }
                 if let Some(resource) = uniforms.as_mut() {
                     resource.destroy(&device, &mut allocator);
                 }
@@ -141,6 +167,9 @@ impl VulkanRenderer {
         let index_buffer = index_buffer.unwrap();
         let depth = depth.unwrap();
         let uniforms = uniforms.unwrap();
+        let texture_set_layout = texture_set_layout.unwrap();
+        let white_texture = white_texture.unwrap();
+        let white_set = white_texture.set;
 
         let properties = unsafe {
             instance
@@ -161,6 +190,11 @@ impl VulkanRenderer {
             index_buffer,
             uniforms,
             depth,
+            texture_set_layout,
+            white_texture,
+            white_set,
+            textures: Vec::new(),
+            texture_sets: Vec::new(),
             allocator: ManuallyDrop::new(allocator),
             pending_resize: None,
             text_renderer: None,
@@ -183,20 +217,27 @@ impl VulkanRenderer {
     /// object's world-space transform (what the caller's simulation produces), `view`/`proj` the
     /// camera — the renderer combines them as `proj * view * model` in the vertex shader.
     pub fn render_frame(&mut self, model: Mat4, view: Mat4, proj: Mat4) -> Result<()> {
-        self.render_objects(std::slice::from_ref(&model), view, proj)
+        self.render_objects(
+            &[Object {
+                model,
+                texture: None,
+            }],
+            view,
+            proj,
+        )
     }
 
-    /// Draw one copy of the uploaded mesh per model transform with a shared camera.
-    /// An empty slice clears and presents the frame without drawing geometry.
-    pub fn render_objects(&mut self, models: &[Mat4], view: Mat4, proj: Mat4) -> Result<()> {
-        self.render_objects_with_text(models, view, proj, &[])
+    /// Draw one copy of the uploaded mesh per object (with its own transform and texture) under a
+    /// shared camera. An empty slice clears and presents the frame without drawing geometry.
+    pub fn render_objects(&mut self, objects: &[Object], view: Mat4, proj: Mat4) -> Result<()> {
+        self.render_objects_with_text(objects, view, proj, &[])
     }
 
     /// Draw scene geometry, then screen-space text. Text is borrowed for this frame only.
     /// Invalid text/overflow returns an error before acquiring or submitting a frame.
     pub fn render_objects_with_text(
         &mut self,
-        models: &[Mat4],
+        objects: &[Object],
         view: Mat4,
         proj: Mat4,
         text: &[text::TextDraw<'_>],
@@ -236,7 +277,10 @@ impl VulkanRenderer {
                     &self.device,
                     self.swapchain.format,
                     self.depth.format(),
-                    self.uniforms.descriptor_set_layout(),
+                    &[
+                        self.uniforms.descriptor_set_layout(),
+                        self.texture_set_layout,
+                    ],
                 )?;
                 let old = std::mem::replace(&mut self.pipeline, ManuallyDrop::new(pipeline));
                 drop(ManuallyDrop::into_inner(old));
@@ -264,13 +308,15 @@ impl VulkanRenderer {
             &self.vertex_buffer,
             &self.index_buffer,
             &camera,
-            models,
+            objects,
+            &self.texture_sets,
+            self.white_set,
             self.text_renderer.as_ref(),
             &self.text_vertices,
         )?;
         if outcome.submitted() {
-            self.scene_draw_calls = models.len();
-            self.submitted_indices = models.len() as u64 * u64::from(self.index_buffer.len());
+            self.scene_draw_calls = objects.len();
+            self.submitted_indices = objects.len() as u64 * u64::from(self.index_buffer.len());
         }
         match outcome {
             command::FrameOutcome::Rendered => {}
@@ -339,6 +385,14 @@ impl Drop for VulkanRenderer {
             self.vertex_buffer
                 .destroy(&self.device, &mut self.allocator);
             self.index_buffer.destroy(&self.device, &mut self.allocator);
+            for texture in &mut self.textures {
+                texture.destroy(&self.device, &mut self.allocator);
+            }
+            self.white_texture
+                .destroy(&self.device, &mut self.allocator);
+            self.device
+                .device
+                .destroy_descriptor_set_layout(self.texture_set_layout, None);
             ManuallyDrop::drop(&mut self.allocator);
             ManuallyDrop::drop(&mut self.swapchain);
             ManuallyDrop::drop(&mut self.device);

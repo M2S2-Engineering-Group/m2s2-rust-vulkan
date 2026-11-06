@@ -21,7 +21,44 @@ impl SampledImage {
         extent: vk::Extent2D,
         pixels: &[u8],
     ) -> Result<Self> {
-        validate_pixels(extent, pixels.len())?;
+        Self::new(
+            device,
+            allocator,
+            extent,
+            pixels,
+            vk::Format::R8_UNORM,
+            1,
+            vk::Filter::NEAREST,
+        )
+    }
+
+    pub fn new_rgba8_srgb(
+        device: &VulkanDevice,
+        allocator: &mut Allocator,
+        extent: vk::Extent2D,
+        pixels: &[u8],
+    ) -> Result<Self> {
+        Self::new(
+            device,
+            allocator,
+            extent,
+            pixels,
+            vk::Format::R8G8B8A8_SRGB,
+            4,
+            vk::Filter::LINEAR,
+        )
+    }
+
+    fn new(
+        device: &VulkanDevice,
+        allocator: &mut Allocator,
+        extent: vk::Extent2D,
+        pixels: &[u8],
+        format: vk::Format,
+        bytes_per_pixel: u32,
+        filter: vk::Filter,
+    ) -> Result<Self> {
+        validate_pixels(extent, pixels.len(), bytes_per_pixel)?;
         let mut staging = Buffer::new_host_visible_mapped(
             device,
             allocator,
@@ -39,7 +76,7 @@ impl SampledImage {
         let result = (|| {
             let info = vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
-                .format(vk::Format::R8_UNORM)
+                .format(format)
                 .extent(vk::Extent3D {
                     width: extent.width,
                     height: extent.height,
@@ -124,7 +161,7 @@ impl SampledImage {
                     &vk::ImageViewCreateInfo::default()
                         .image(resource.image)
                         .view_type(vk::ImageViewType::TYPE_2D)
-                        .format(vk::Format::R8_UNORM)
+                        .format(format)
                         .subresource_range(
                             vk::ImageSubresourceRange::default()
                                 .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -137,8 +174,8 @@ impl SampledImage {
             resource.sampler = unsafe {
                 dev.create_sampler(
                     &vk::SamplerCreateInfo::default()
-                        .mag_filter(vk::Filter::NEAREST)
-                        .min_filter(vk::Filter::NEAREST)
+                        .mag_filter(filter)
+                        .min_filter(filter)
                         .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
                         .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                         .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
@@ -168,13 +205,14 @@ impl SampledImage {
     }
 }
 
-fn validate_pixels(extent: vk::Extent2D, len: usize) -> Result<()> {
+fn validate_pixels(extent: vk::Extent2D, len: usize, bytes_per_pixel: u32) -> Result<()> {
     if extent.width == 0
         || extent.height == 0
-        || u64::from(extent.width) * u64::from(extent.height) != len as u64
+        || u64::from(extent.width) * u64::from(extent.height) * u64::from(bytes_per_pixel)
+            != len as u64
     {
         return Err(VulkanError::ValidationError(
-            "R8 image extent must match its pixel bytes".into(),
+            "sampled image extent must match its pixel bytes".into(),
         ));
     }
     Ok(())
@@ -184,13 +222,15 @@ fn validate_pixels(extent: vk::Extent2D, len: usize) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn rejects_empty_or_mismatched_images() {
+    fn validates_pixel_byte_count_by_bpp() {
+        // 1 bpp (font path)
         assert!(validate_pixels(
             vk::Extent2D {
                 width: 2,
                 height: 3
             },
-            6
+            6,
+            1
         )
         .is_ok());
         assert!(validate_pixels(
@@ -198,15 +238,37 @@ mod tests {
                 width: 2,
                 height: 3
             },
-            5
+            5,
+            1
         )
         .is_err());
+        // 4 bpp (RGBA textures)
+        assert!(validate_pixels(
+            vk::Extent2D {
+                width: 2,
+                height: 3
+            },
+            24,
+            4
+        )
+        .is_ok());
+        assert!(validate_pixels(
+            vk::Extent2D {
+                width: 2,
+                height: 3
+            },
+            23,
+            4
+        )
+        .is_err());
+        // zero extent
         assert!(validate_pixels(
             vk::Extent2D {
                 width: 0,
                 height: 3
             },
-            0
+            0,
+            4
         )
         .is_err());
     }
