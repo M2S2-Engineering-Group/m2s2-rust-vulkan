@@ -1,7 +1,7 @@
 // Vertex data types and GPU buffers. See specs/003-vertex-buffers.md.
 
 use crate::error::{Result, VulkanError};
-use crate::math::Vec3;
+use crate::math::{Vec2, Vec3};
 use crate::renderer::allocator::Allocator;
 use crate::renderer::device::VulkanDevice;
 use ash::vk;
@@ -11,14 +11,15 @@ use gpu_allocator::MemoryLocation;
 /// Index type for index buffers — `u16` (bound as `vk::IndexType::UINT16`).
 pub type Index = u16;
 
-/// A single vertex: a position and a color, both in clip space / RGB. `#[repr(C)]` + `Pod` so a
-/// `&[Vertex]` can be uploaded to a GPU buffer byte-for-byte (see `Buffer`). `Vec3` is
-/// `m2s2-math`'s `Vector3f32`, `Pod` under its `bytemuck` feature (identical layout to `[f32; 3]`).
+/// A single vertex: a position (clip/world space), an RGB color, and a UV texture coordinate.
+/// `#[repr(C)]` + `Pod` so a `&[Vertex]` uploads byte-for-byte. `Vec2`/`Vec3` are `m2s2-math`
+/// vectors, `Pod` under its `bytemuck` feature (identical layout to `[f32; N]`).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     pub position: Vec3,
     pub color: Vec3,
+    pub uv: Vec2,
 }
 
 impl Vertex {
@@ -30,9 +31,9 @@ impl Vertex {
             .input_rate(vk::VertexInputRate::VERTEX)
     }
 
-    /// Shader inputs: `location = 0` position, `location = 1` color — offsets derived from the
-    /// struct so they can't drift from the field order.
-    pub fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 2] {
+    /// Shader inputs: `location = 0` position, `location = 1` color, `location = 2` uv — offsets
+    /// derived from the struct so they can't drift from the field order.
+    pub fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 3] {
         [
             vk::VertexInputAttributeDescription::default()
                 .location(0)
@@ -44,6 +45,11 @@ impl Vertex {
                 .binding(0)
                 .format(vk::Format::R32G32B32_SFLOAT)
                 .offset(std::mem::offset_of!(Vertex, color) as u32),
+            vk::VertexInputAttributeDescription::default()
+                .location(2)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(std::mem::offset_of!(Vertex, uv) as u32),
         ]
     }
 }
@@ -224,8 +230,10 @@ mod tests {
 
     #[test]
     fn vertex_is_tightly_packed() {
-        // position (Vec3 = 12 bytes) + color (Vec3 = 12 bytes), no padding.
-        assert_eq!(std::mem::size_of::<Vertex>(), 24);
+        assert_eq!(std::mem::size_of::<Vertex>(), 32);
+        assert_eq!(std::mem::offset_of!(Vertex, position), 0);
+        assert_eq!(std::mem::offset_of!(Vertex, color), 12);
+        assert_eq!(std::mem::offset_of!(Vertex, uv), 24);
     }
 
     #[test]
@@ -237,17 +245,17 @@ mod tests {
     }
 
     #[test]
-    fn attribute_descriptions_map_position_then_color() {
-        let a = Vertex::attribute_descriptions();
-        // location 0 = position, at the start of the struct
-        assert_eq!(a[0].location, 0);
-        assert_eq!(a[0].binding, 0);
-        assert_eq!(a[0].format, vk::Format::R32G32B32_SFLOAT);
-        assert_eq!(a[0].offset, 0);
-        // location 1 = color, 12 bytes in (after the position Vec3)
-        assert_eq!(a[1].location, 1);
-        assert_eq!(a[1].binding, 0);
-        assert_eq!(a[1].format, vk::Format::R32G32B32_SFLOAT);
-        assert_eq!(a[1].offset, 12);
+    fn attribute_descriptions_map_position_color_then_uv() {
+        let attrs = Vertex::attribute_descriptions();
+        assert_eq!(attrs.len(), 3);
+        assert_eq!(attrs[0].location, 0);
+        assert_eq!(attrs[0].format, vk::Format::R32G32B32_SFLOAT);
+        assert_eq!(attrs[0].offset, 0);
+        assert_eq!(attrs[1].location, 1);
+        assert_eq!(attrs[1].format, vk::Format::R32G32B32_SFLOAT);
+        assert_eq!(attrs[1].offset, 12);
+        assert_eq!(attrs[2].location, 2);
+        assert_eq!(attrs[2].format, vk::Format::R32G32_SFLOAT);
+        assert_eq!(attrs[2].offset, 24);
     }
 }

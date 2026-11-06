@@ -2,7 +2,7 @@
 // the library. For a 3D scene (per-frame MVP uniforms, a moving model matrix, depth testing) see
 // examples/cube.rs.
 
-use m2s2_rust_vulkan::math::{look_at, perspective, to_radians, Mat4, Vec3};
+use m2s2_rust_vulkan::math::{look_at, perspective, to_radians, Mat4, Vec2, Vec3};
 use m2s2_rust_vulkan::{init_logging, Index, Vertex, VulkanRenderer};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -29,14 +29,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Vertex {
             position: Vec3::new(-0.5, -0.5, 0.0),
             color: Vec3::new(1.0, 0.0, 0.0),
+            uv: Vec2::new(0.0, 0.0),
         },
         Vertex {
             position: Vec3::new(0.5, -0.5, 0.0),
             color: Vec3::new(0.0, 1.0, 0.0),
+            uv: Vec2::new(1.0, 0.0),
         },
         Vertex {
             position: Vec3::new(0.0, 0.5, 0.0),
             color: Vec3::new(0.0, 0.0, 1.0),
+            uv: Vec2::new(0.5, 1.0),
         },
     ];
     let indices: [Index; 3] = [0, 1, 2];
