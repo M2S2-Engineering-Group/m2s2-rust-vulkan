@@ -178,4 +178,24 @@ separate future efforts.
 
 ## Outcome
 
-_To be recorded after implementation and the GPU regression check._
+Implemented across three tasks (`d232d41`..`05395d4`): `Vertex` gained `uv`; `image.rs`'s sampled-image
+constructor was generalized by format/bpp with `new_rgba8_srgb` added; `texture.rs` added `TextureId`,
+`Object`, `StoredTexture`, `create_set_layout`, and `resolve_texture_set`; the scene pipeline layout
+gained `set_layouts[1]`; `command.rs`'s `emit_object_draws` gained `BindTexture`; `mod.rs` owns the
+set-1 layout, the white default, the texture store, and `create_texture`; the draw API moved to
+`&[Object]`; shaders sample `set = 1, binding = 0` and multiply by vertex color. One post-review fix
+(`5802032`) closed a descriptor-pool leak on `StoredTexture::new`'s error path.
+
+Verified: 48 CPU unit tests pass (vertex layout/offsets, `validate_pixels` by bpp, texture-set
+resolution including out-of-range fallback, `emit_object_draws` command ordering, SPIR-V magic-word
+parsing of the recompiled shaders) and all four quality gates (`fmt`, `clippy -D warnings`, `build
+--all-targets`, `test --all-targets`) are clean.
+
+GPU acceptance (manual, with `VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT`): both
+examples run clean. `examples/cube.rs` renders two objects, each sampling a distinct uploaded 2x2
+checker texture modulated by vertex color (confirmed visually — the low texture resolution plus linear
+filtering blends each face smoothly between its four texel corners rather than showing hard checker
+squares, which is expected at 2x2, not a binding defect). `examples/triangle.rs` (`render_frame` →
+`Object { texture: None }`) renders unchanged from the pre-010 vertex-colored look, confirming the
+white-default regression guarantee. No validation errors in either run. Mipmaps and instancing remain
+deferred, per Non-goals.

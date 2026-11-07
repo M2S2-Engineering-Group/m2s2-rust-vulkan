@@ -55,7 +55,7 @@ What separates "a triangle renders" from "a usable rendering engine" for simple 
 - [x] **Uniform buffers & descriptor sets**: per-frame camera matrices (model transforms use push constants) via `m2s2-math` — see [specs/006](specs/006-uniforms-depth-camera.md)
 - [x] **Push constants** for small, frequently-updated per-draw data — [spec 007](specs/007-multiple-objects-and-push-constants.md)
 - [x] **Camera**: view/projection using `src/math.rs`'s existing `perspective`/`look_at` — see [specs/006](specs/006-uniforms-depth-camera.md)
-- [ ] **Textures**: image loading, `VkImage`/`VkImageView` creation, layout transitions, samplers, mipmaps
+- [x] **Textures**: image loading, `VkImage`/`VkImageView` creation, layout transitions, samplers — [spec 010](specs/010-textures.md). Mipmaps deferred to a follow-up spec.
 - [x] **Multiple draw calls**: independently transformed copies of one mesh through one pipeline — [spec 007](specs/007-multiple-objects-and-push-constants.md)
 - [ ] **Basic instancing**: deferred; 007 issues separate indexed draws
 - [x] **Text drawing and diagnostic overlay**: reusable text submissions; camera position, FPS/CPU frame interval, scene counts, device and swapchain state — [spec 008](specs/008-diagnostic-text-overlay.md). Shared sampled-R8 uploads are available; general textures remain below.
