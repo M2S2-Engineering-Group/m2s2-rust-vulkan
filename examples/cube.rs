@@ -2,8 +2,9 @@ use m2s2_rust_vulkan::math::{
     look_at, perspective, rotate, to_radians, translate, Vec2, Vec3, Vec4,
 };
 use m2s2_rust_vulkan::{
-    init_logging, Diagnostics, Index, Object, TextDraw, Vertex, VulkanRenderer,
+    init_logging, Diagnostics, DirectionalLight, Index, Object, TextDraw, Vertex, VulkanRenderer,
 };
+use std::collections::HashSet;
 use std::time::Instant;
 use winit::event::{ElementState, Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -13,6 +14,27 @@ use winit::window::WindowBuilder;
 
 // Leaves clearance between the unit cubes throughout their rotations.
 const CUBE_CENTER_OFFSET: f32 = 1.0;
+// Free-fly camera tuning.
+const MOVE_SPEED: f32 = 3.0; // world units per second (WASD)
+const LOOK_SPEED: f32 = 1.5; // radians per second (arrow keys)
+const MAX_PITCH: f32 = 1.553; // ~89 degrees, keeps the camera from flipping over the pole
+
+/// Builds the four vertices of one cube face, each carrying the face's outward `normal` so lighting
+/// shades per face. `corners` are the face's 4 positions in CCW order as seen from outside (matching
+/// the pipeline's CCW-front + back-face culling), paired with a per-corner color; UVs map the unit
+/// square. Flat per-face normals are why the cube needs 24 vertices, not 8 shared corners.
+fn face(normal: [f32; 3], corners: [([f32; 3], [f32; 3]); 4]) -> [Vertex; 4] {
+    const UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    std::array::from_fn(|i| {
+        let (p, c) = corners[i];
+        Vertex {
+            position: Vec3::new(p[0], p[1], p[2]),
+            color: Vec3::new(c[0], c[1], c[2]),
+            uv: Vec2::new(UVS[i][0], UVS[i][1]),
+            normal: Vec3::new(normal[0], normal[1], normal[2]),
+        }
+    })
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
@@ -27,71 +49,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Initializing Vulkan renderer...");
     let size = window.inner_size();
 
-    // Geometry lives in the consumer, not the library (spec 006): a unit cube centered at the
-    // origin. 8 corners, one color each; 36 indices (12 triangles) wound CCW-outward to match the
-    // pipeline's counter-clockwise front face + back-face culling.
-    // Placeholder per-corner normals (normalized position, 1/sqrt(3) per axis) so the type compiles
-    // and shades sanely; Task 4 replaces this 8-vertex mesh with a 24-vertex per-face one.
-    const D: f32 = 0.577_350_26;
-    let vertices = [
-        Vertex {
-            position: Vec3::new(-0.5, -0.5, -0.5),
-            color: Vec3::new(0.0, 0.0, 0.0),
-            uv: Vec2::new(0.0, 0.0),
-            normal: Vec3::new(-D, -D, -D),
-        },
-        Vertex {
-            position: Vec3::new(0.5, -0.5, -0.5),
-            color: Vec3::new(1.0, 0.0, 0.0),
-            uv: Vec2::new(1.0, 0.0),
-            normal: Vec3::new(D, -D, -D),
-        },
-        Vertex {
-            position: Vec3::new(0.5, 0.5, -0.5),
-            color: Vec3::new(1.0, 1.0, 0.0),
-            uv: Vec2::new(1.0, 1.0),
-            normal: Vec3::new(D, D, -D),
-        },
-        Vertex {
-            position: Vec3::new(-0.5, 0.5, -0.5),
-            color: Vec3::new(0.0, 1.0, 0.0),
-            uv: Vec2::new(0.0, 1.0),
-            normal: Vec3::new(-D, D, -D),
-        },
-        Vertex {
-            position: Vec3::new(-0.5, -0.5, 0.5),
-            color: Vec3::new(0.0, 0.0, 1.0),
-            uv: Vec2::new(0.0, 0.0),
-            normal: Vec3::new(-D, -D, D),
-        },
-        Vertex {
-            position: Vec3::new(0.5, -0.5, 0.5),
-            color: Vec3::new(1.0, 0.0, 1.0),
-            uv: Vec2::new(1.0, 0.0),
-            normal: Vec3::new(D, -D, D),
-        },
-        Vertex {
-            position: Vec3::new(0.5, 0.5, 0.5),
-            color: Vec3::new(1.0, 1.0, 1.0),
-            uv: Vec2::new(1.0, 1.0),
-            normal: Vec3::new(D, D, D),
-        },
-        Vertex {
-            position: Vec3::new(-0.5, 0.5, 0.5),
-            color: Vec3::new(0.0, 1.0, 1.0),
-            uv: Vec2::new(0.0, 1.0),
-            normal: Vec3::new(-D, D, D),
-        },
-    ];
-    #[rustfmt::skip]
-    let indices: [Index; 36] = [
-        4, 5, 6,  6, 7, 4, // front (+Z)
-        1, 0, 3,  3, 2, 1, // back  (-Z)
-        0, 4, 7,  7, 3, 0, // left  (-X)
-        5, 1, 2,  2, 6, 5, // right (+X)
-        3, 7, 6,  6, 2, 3, // top   (+Y)
-        0, 1, 5,  5, 4, 0, // bottom(-Y)
-    ];
+    // Geometry lives in the consumer, not the library (spec 006): a unit cube centered at the origin,
+    // built face-by-face as 24 vertices (4 per face) so each face carries its own outward normal for
+    // crisp flat lighting. Per-corner colors reuse the 8-corner palette. 36 indices (6 per face).
+    const BLACK: [f32; 3] = [0.0, 0.0, 0.0];
+    const RED: [f32; 3] = [1.0, 0.0, 0.0];
+    const YELLOW: [f32; 3] = [1.0, 1.0, 0.0];
+    const GREEN: [f32; 3] = [0.0, 1.0, 0.0];
+    const BLUE: [f32; 3] = [0.0, 0.0, 1.0];
+    const MAGENTA: [f32; 3] = [1.0, 0.0, 1.0];
+    const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
+    const CYAN: [f32; 3] = [0.0, 1.0, 1.0];
+    let mut vertices = Vec::with_capacity(24);
+    vertices.extend(face(
+        [0.0, 0.0, 1.0], // front (+Z)
+        [
+            ([-0.5, -0.5, 0.5], BLUE),
+            ([0.5, -0.5, 0.5], MAGENTA),
+            ([0.5, 0.5, 0.5], WHITE),
+            ([-0.5, 0.5, 0.5], CYAN),
+        ],
+    ));
+    vertices.extend(face(
+        [0.0, 0.0, -1.0], // back (-Z)
+        [
+            ([0.5, -0.5, -0.5], RED),
+            ([-0.5, -0.5, -0.5], BLACK),
+            ([-0.5, 0.5, -0.5], GREEN),
+            ([0.5, 0.5, -0.5], YELLOW),
+        ],
+    ));
+    vertices.extend(face(
+        [-1.0, 0.0, 0.0], // left (-X)
+        [
+            ([-0.5, -0.5, -0.5], BLACK),
+            ([-0.5, -0.5, 0.5], BLUE),
+            ([-0.5, 0.5, 0.5], CYAN),
+            ([-0.5, 0.5, -0.5], GREEN),
+        ],
+    ));
+    vertices.extend(face(
+        [1.0, 0.0, 0.0], // right (+X)
+        [
+            ([0.5, -0.5, 0.5], MAGENTA),
+            ([0.5, -0.5, -0.5], RED),
+            ([0.5, 0.5, -0.5], YELLOW),
+            ([0.5, 0.5, 0.5], WHITE),
+        ],
+    ));
+    vertices.extend(face(
+        [0.0, 1.0, 0.0], // top (+Y)
+        [
+            ([-0.5, 0.5, 0.5], CYAN),
+            ([0.5, 0.5, 0.5], WHITE),
+            ([0.5, 0.5, -0.5], YELLOW),
+            ([-0.5, 0.5, -0.5], GREEN),
+        ],
+    ));
+    vertices.extend(face(
+        [0.0, -1.0, 0.0], // bottom (-Y)
+        [
+            ([-0.5, -0.5, -0.5], BLACK),
+            ([0.5, -0.5, -0.5], RED),
+            ([0.5, -0.5, 0.5], MAGENTA),
+            ([-0.5, -0.5, 0.5], BLUE),
+        ],
+    ));
+    // Each face's 4 vertices (base b = face*4) triangulate as (b,b+1,b+2) + (b+2,b+3,b), CCW-outward.
+    let indices: Vec<Index> = (0..6u16)
+        .flat_map(|f| {
+            let b = f * 4;
+            [b, b + 1, b + 2, b + 2, b + 3, b]
+        })
+        .collect();
 
     let mut renderer = VulkanRenderer::new(
         window.display_handle()?.as_raw(),
@@ -116,12 +146,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_texture(&checker([40, 80, 255, 255], [40, 255, 120, 255]), 2, 2)
         .expect("create texture B");
 
+    // A stationary sun. Faces toward it are bright; faces away fall to the ambient floor. Moving the
+    // camera (WASD + arrows) reveals the lit/unlit faces from every angle.
+    renderer.set_directional_light(DirectionalLight {
+        direction: Vec3::new(-0.4, -1.0, -0.6),
+        color: Vec3::new(1.0, 0.97, 0.9),
+        ambient: Vec3::new(0.12, 0.12, 0.15),
+    });
+
     // The "simulation" side: a start time the cube's model matrix spins off of. This is what a game
     // engine's update step would own; the renderer only receives the resulting matrices (spec 006).
     let start = Instant::now();
     let mut last_frame = start;
     let mut diagnostics = Diagnostics::default();
     let mut show_diagnostics = true;
+
+    // Free-fly camera state. Initial pose sits back from the scene looking at the origin; the initial
+    // yaw/pitch are derived from that look direction so "reset" (R) returns here exactly.
+    let initial_pos = [2.0_f32, 2.0, 5.0];
+    let (dx, dy, dz) = (-initial_pos[0], -initial_pos[1], -initial_pos[2]);
+    let dlen = (dx * dx + dy * dy + dz * dz).sqrt();
+    let initial_yaw = (dz / dlen).atan2(dx / dlen);
+    let initial_pitch = (dy / dlen).asin();
+    let (mut cam_x, mut cam_y, mut cam_z) = (initial_pos[0], initial_pos[1], initial_pos[2]);
+    let mut yaw = initial_yaw;
+    let mut pitch = initial_pitch;
+    let mut held: HashSet<KeyCode> = HashSet::new();
 
     log::info!("Starting render loop...");
     event_loop.run(move |event, elwt| {
@@ -146,16 +196,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::WindowEvent {
                 event: WindowEvent::KeyboardInput { event, .. },
                 ..
-            } if event.state == ElementState::Pressed
-                && !event.repeat
-                && event.physical_key == PhysicalKey::Code(KeyCode::F3) =>
-            {
-                show_diagnostics = !show_diagnostics;
+            } => {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    match event.state {
+                        ElementState::Pressed => {
+                            held.insert(code);
+                            if !event.repeat {
+                                match code {
+                                    KeyCode::F3 => show_diagnostics = !show_diagnostics,
+                                    KeyCode::KeyR => {
+                                        cam_x = initial_pos[0];
+                                        cam_y = initial_pos[1];
+                                        cam_z = initial_pos[2];
+                                        yaw = initial_yaw;
+                                        pitch = initial_pitch;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        ElementState::Released => {
+                            held.remove(&code);
+                        }
+                    }
+                }
             }
             Event::AboutToWait => {
                 let now = Instant::now();
-                diagnostics.update(now.duration_since(last_frame));
+                let frame_dt = now.duration_since(last_frame);
+                diagnostics.update(frame_dt);
                 last_frame = now;
+                let dt = frame_dt.as_secs_f32();
                 let size = window.inner_size();
                 if size.width == 0 || size.height == 0 {
                     return; // minimized; nothing to draw
@@ -180,13 +251,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         texture: Some(tex_b),
                     },
                 ];
-                let camera_position = Vec3::new(2.0, 2.0, 2.0);
-                let view = look_at(
-                    &camera_position,
-                    &Vec3::new(0.0, 0.0, 0.0),
-                    &Vec3::new(0.0, 1.0, 0.0),
-                );
-                let proj = perspective(to_radians(45.0), aspect, 0.1, 10.0);
+                // Free-fly camera: arrow keys rotate (yaw/pitch), WASD move relative to the facing.
+                if held.contains(&KeyCode::ArrowLeft) {
+                    yaw -= LOOK_SPEED * dt;
+                }
+                if held.contains(&KeyCode::ArrowRight) {
+                    yaw += LOOK_SPEED * dt;
+                }
+                if held.contains(&KeyCode::ArrowUp) {
+                    pitch += LOOK_SPEED * dt;
+                }
+                if held.contains(&KeyCode::ArrowDown) {
+                    pitch -= LOOK_SPEED * dt;
+                }
+                pitch = pitch.clamp(-MAX_PITCH, MAX_PITCH);
+
+                let (sy, cy) = yaw.sin_cos();
+                let (sp, cp) = pitch.sin_cos();
+                let forward = [cp * cy, sp, cp * sy];
+                // Right = normalize(forward x worldUp), worldUp = (0,1,0) -> (-fz, 0, fx).
+                let rlen = (forward[2] * forward[2] + forward[0] * forward[0]).sqrt();
+                let right = if rlen > 1e-6 {
+                    [-forward[2] / rlen, 0.0, forward[0] / rlen]
+                } else {
+                    [1.0, 0.0, 0.0]
+                };
+                let mut mv = [0.0_f32; 3];
+                for (key, dir, sign) in [
+                    (KeyCode::KeyW, forward, 1.0),
+                    (KeyCode::KeyS, forward, -1.0),
+                    (KeyCode::KeyD, right, 1.0),
+                    (KeyCode::KeyA, right, -1.0),
+                ] {
+                    if held.contains(&key) {
+                        mv[0] += dir[0] * sign;
+                        mv[1] += dir[1] * sign;
+                        mv[2] += dir[2] * sign;
+                    }
+                }
+                let mlen = (mv[0] * mv[0] + mv[1] * mv[1] + mv[2] * mv[2]).sqrt();
+                if mlen > 1e-6 {
+                    let step = MOVE_SPEED * dt / mlen;
+                    cam_x += mv[0] * step;
+                    cam_y += mv[1] * step;
+                    cam_z += mv[2] * step;
+                }
+
+                let camera_position = Vec3::new(cam_x, cam_y, cam_z);
+                let target = Vec3::new(cam_x + forward[0], cam_y + forward[1], cam_z + forward[2]);
+                let view = look_at(&camera_position, &target, &Vec3::new(0.0, 1.0, 0.0));
+                let proj = perspective(to_radians(45.0), aspect, 0.1, 100.0);
 
                 let diagnostic_text = diagnostics.format(&renderer.stats(), camera_position);
                 let text = [TextDraw {
