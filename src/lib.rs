@@ -5,6 +5,7 @@ pub mod renderer;
 pub use error::{Result, VulkanError};
 pub use renderer::buffer::{Index, Vertex};
 pub use renderer::diagnostics::{Diagnostics, RenderStatus, RendererStats};
+pub use renderer::light::DirectionalLight;
 pub use renderer::text::TextDraw;
 pub use renderer::texture::{Object, TextureId};
 pub use renderer::VulkanRenderer;

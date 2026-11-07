@@ -66,7 +66,8 @@ impl GraphicsPipeline {
     /// the depth attachment's (`DepthResources::format`). `set_layouts` are referenced by the
     /// pipeline layout in order, so the shader can read `set = 0`, `set = 1`, etc. (the per-frame
     /// camera uniform layout from `uniform.rs`, then the per-object texture layout from
-    /// `texture.rs`). No `extent` parameter: viewport and scissor are dynamic state, set per-frame
+    /// `texture.rs`, then the per-frame light layout from `light.rs`). No `extent` parameter:
+    /// viewport and scissor are dynamic state, set per-frame
     /// in `command.rs` (spec 002).
     pub fn new(
         device: &VulkanDevice,

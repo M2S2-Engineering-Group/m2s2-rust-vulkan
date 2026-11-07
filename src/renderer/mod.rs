@@ -7,6 +7,7 @@ pub mod device;
 pub mod diagnostics;
 mod image;
 pub mod instance;
+pub mod light;
 pub(crate) mod per_frame_uniform;
 pub mod pipeline;
 pub mod swapchain;
@@ -18,6 +19,7 @@ mod upload;
 use crate::error::{Result, VulkanError};
 use crate::math::Mat4;
 use ash::vk;
+use light::{DirectionalLight, Light};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::mem::ManuallyDrop;
 use texture::{Object, StoredTexture};
@@ -52,6 +54,10 @@ pub struct VulkanRenderer {
     pub(crate) white_set: vk::DescriptorSet,
     pub(crate) textures: Vec<StoredTexture>,
     pub(crate) texture_sets: Vec<vk::DescriptorSet>,
+    // Per-frame light uniform (descriptor set 2) and the current directional light it uploads each
+    // frame. Like `uniforms`, freed via explicit `destroy` in `Drop` before the allocator.
+    pub(crate) light: Light,
+    pub(crate) directional_light: DirectionalLight,
     pub allocator: ManuallyDrop<allocator::Allocator>,
     // A pending resize target in physical pixels; the next `render_frame` recreates the swapchain to
     // it. Set by `resize` and by an out-of-date frame. `None` = nothing pending.
@@ -95,6 +101,7 @@ impl VulkanRenderer {
         let mut uniforms = None;
         let mut texture_set_layout = None;
         let mut white_texture = None;
+        let mut light = None;
         let resources = (|| {
             vertex_buffer = Some(buffer::Buffer::new_device_local(
                 &device,
@@ -130,11 +137,17 @@ impl VulkanRenderer {
                 1,
             )?);
 
+            light = Some(Light::new(&device, &mut allocator)?);
+
             let pipeline = pipeline::GraphicsPipeline::new(
                 &device,
                 swapchain.format,
                 depth.as_ref().unwrap().format(),
-                &[uniforms.as_ref().unwrap().descriptor_set_layout(), layout],
+                &[
+                    uniforms.as_ref().unwrap().descriptor_set_layout(),
+                    layout,
+                    light.as_ref().unwrap().descriptor_set_layout(),
+                ],
             )?;
             let frame_context = command::FrameContext::new(&device, swapchain.images.len())?;
 
@@ -143,6 +156,9 @@ impl VulkanRenderer {
         let (pipeline, frame_context) = match resources {
             Ok(resources) => resources,
             Err(error) => {
+                if let Some(mut resource) = light.take() {
+                    resource.destroy(&device, &mut allocator);
+                }
                 if let Some(mut resource) = white_texture.take() {
                     resource.destroy(&device, &mut allocator);
                 }
@@ -171,6 +187,7 @@ impl VulkanRenderer {
         let texture_set_layout = texture_set_layout.unwrap();
         let white_texture = white_texture.unwrap();
         let white_set = white_texture.set;
+        let light = light.unwrap();
 
         let properties = unsafe {
             instance
@@ -196,6 +213,8 @@ impl VulkanRenderer {
             white_set,
             textures: Vec::new(),
             texture_sets: Vec::new(),
+            light,
+            directional_light: DirectionalLight::default(),
             allocator: ManuallyDrop::new(allocator),
             pending_resize: None,
             text_renderer: None,
@@ -212,6 +231,12 @@ impl VulkanRenderer {
     /// pauses rendering until it's non-zero again.
     pub fn resize(&mut self, new_extent: (u32, u32)) {
         self.pending_resize = Some(new_extent);
+    }
+
+    /// Set the directional ("sun") light used for subsequent frames. Takes effect on the next
+    /// `render_*` call, which uploads it into that frame's light uniform.
+    pub fn set_directional_light(&mut self, light: DirectionalLight) {
+        self.directional_light = light;
     }
 
     /// Draw one frame of the caller-supplied geometry under the given transform. `model` is the
@@ -281,6 +306,7 @@ impl VulkanRenderer {
                     &[
                         self.uniforms.descriptor_set_layout(),
                         self.texture_set_layout,
+                        self.light.descriptor_set_layout(),
                     ],
                 )?;
                 let old = std::mem::replace(&mut self.pipeline, ManuallyDrop::new(pipeline));
@@ -309,6 +335,8 @@ impl VulkanRenderer {
             &self.vertex_buffer,
             &self.index_buffer,
             &camera,
+            &self.light,
+            &self.directional_light,
             objects,
             &self.texture_sets,
             self.white_set,
@@ -404,6 +432,7 @@ impl Drop for VulkanRenderer {
             // buffers) before dropping the allocator -- every allocation must outlive neither the
             // allocator nor the device it was built from.
             self.uniforms.destroy(&self.device, &mut self.allocator);
+            self.light.destroy(&self.device, &mut self.allocator);
             self.depth.destroy(&self.device, &mut self.allocator);
             self.vertex_buffer
                 .destroy(&self.device, &mut self.allocator);

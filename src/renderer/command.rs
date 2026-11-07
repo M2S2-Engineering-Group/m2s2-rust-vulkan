@@ -3,6 +3,7 @@
 // rendering gap" section, since this is the one part of the render loop that can't be a
 // straight port of vulkan-tutorial.com's render-pass-based version.
 
+use super::light::{DirectionalLight, Light};
 use super::text::{TextRenderer, TextVertex};
 use super::texture::{resolve_texture_set, Object};
 use crate::error::{Result, VulkanError};
@@ -138,6 +139,8 @@ impl FrameContext {
         vertex_buffer: &Buffer,
         index_buffer: &Buffer,
         camera: &CameraUniforms,
+        light: &Light,
+        directional_light: &DirectionalLight,
         objects: &[Object],
         texture_sets: &[vk::DescriptorSet],
         white_set: vk::DescriptorSet,
@@ -191,6 +194,7 @@ impl FrameContext {
         //     per-frame-in-flight and step 1's fence wait guarantees the GPU finished the previous
         //     use of this slot.
         uniforms.update(frame, camera);
+        light.update(frame, directional_light);
         if let Some(text) = text {
             text.update(frame, text_vertices);
         }
@@ -203,6 +207,7 @@ impl FrameContext {
             swapchain,
             depth,
             uniforms.descriptor_set(frame),
+            light.descriptor_set(frame),
             image_index,
             vertex_buffer,
             index_buffer,
@@ -273,6 +278,7 @@ impl FrameContext {
         swapchain: &VulkanSwapchain,
         depth: &DepthResources,
         descriptor_set: vk::DescriptorSet,
+        light_set: vk::DescriptorSet,
         image_index: u32,
         vertex_buffer: &Buffer,
         index_buffer: &Buffer,
@@ -373,7 +379,8 @@ impl FrameContext {
                 .depth_attachment(&depth_attachment);
             dev.cmd_begin_rendering(cmd, &rendering_info);
 
-            // c. Bind the pipeline and the per-frame camera descriptor set (set = 0).
+            // c. Bind the pipeline and the per-frame camera (set = 0) and light (set = 2) descriptor
+            //    sets. Both are frame-global; the per-object texture (set = 1) binds in the draw loop.
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
             dev.cmd_bind_descriptor_sets(
                 cmd,
@@ -381,6 +388,14 @@ impl FrameContext {
                 pipeline.pipeline_layout,
                 0,
                 &[descriptor_set],
+                &[],
+            );
+            dev.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline.pipeline_layout,
+                2,
+                &[light_set],
                 &[],
             );
 
