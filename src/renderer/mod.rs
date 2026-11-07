@@ -7,6 +7,7 @@ pub mod device;
 pub mod diagnostics;
 mod image;
 pub mod instance;
+pub(crate) mod per_frame_uniform;
 pub mod pipeline;
 pub mod swapchain;
 pub mod text;
