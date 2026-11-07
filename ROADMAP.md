@@ -67,6 +67,24 @@ What separates "a triangle renders" from "a usable rendering engine" for simple 
 
 **Milestone**: a lit, textured 3D scene with a movable camera and more than one object.
 
+**Before the next feature**: review [draft spec 012](specs/012-resource-ownership-and-memory-safety.md)
+for ownership, mapped-memory writes, destruction, and submission-failure cleanup. This is a safety
+cleanup proposed ahead of additional rendering features; implementation has not started.
+
+Proposed follow-ups after cleanup: [draft spec 013](specs/013-specular-lighting.md) adds per-object
+Blinn–Phong highlights and explicit frame camera data; [draft spec 014](specs/014-texture-mipmaps.md)
+adds optional generated texture mip chains. Both are awaiting review; neither is implemented.
+
+Additional drafts (all unimplemented):
+
+- [015: Multiple mesh resources](specs/015-multiple-mesh-resources.md) — typed mesh handles and renderer identity; builds on 012/013.
+- [016: GPU instancing](specs/016-gpu-instancing.md) — consecutive mesh/texture batches; builds on 015 and per-object material data.
+- [017: Directional shadow mapping](specs/017-directional-shadow-mapping.md) — explicit two-pass shadows; pass interfaces provisional, with 016 reused when present.
+- [018: Point lighting](specs/018-point-lighting.md) — bounded positioned lights; builds on 011–013 and can precede shadow implementation.
+
+Numbering identifies documents, not a mandatory execution sequence. Resolve ownership contracts first;
+point lighting and mipmaps can proceed independently of the mesh/instancing/shadow sequence.
+
 ## Phase 3: Scene & asset infrastructure
 
 Since this library is explicitly scoped to Vulkan mechanics (see [CLAUDE.md](CLAUDE.md)'s Architecture
