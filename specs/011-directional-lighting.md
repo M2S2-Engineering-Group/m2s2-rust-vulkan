@@ -64,7 +64,7 @@ impl VulkanRenderer {
     /// Replace the directional light used for subsequent frames. Takes effect on the next `render_*`
     /// call (uploaded into that frame's light uniform). Cheap; may be called every frame if a future
     /// consumer wants a moving light.
-    pub fn set_directional_light(&mut self, light: DirectionalLight);
+    pub fn set_directional_light(&mut self, light: DirectionalLight) -> Result<()>;
 }
 ```
 
@@ -277,3 +277,24 @@ normal-matrix shading are only observable there.
 
 Deferred per Non-goals: specular (Phong/Blinn-Phong), point/spot lights, multiple lights, shadows. The
 roadmap "Basic lighting" box therefore stays unchecked pending that follow-up work.
+
+### Review amendment: input validation and camera robustness
+
+The setter now returns `Result<()>`. Direction components must be finite and their squared f32 length
+must be finite and at least `f32::MIN_POSITIVE`, with at least one normal squared component,
+so shader normalization neither overflows nor relies on subnormal values. Color and ambient components must be finite and nonnegative; values above one
+remain valid intensities. Invalid input returns `VulkanError::ValidationError` and leaves the previous
+light unchanged. The example propagates setup errors with `?`.
+
+The example clears held keys on focus loss and ignores key presses while unfocused. Camera movement
+and look use zero delta while unfocused and otherwise cap simulation delta at 100 ms. Diagnostics
+continue to receive the actual frame interval. This bounds movement after stalls without distorting
+reported timing. Regression tests exercise focus/key transitions, delta boundaries, valid/invalid
+light values, and preservation of the current light on rejection.
+
+
+Verification of this amendment: 54 library tests plus 2 camera example tests pass, including invalid
+light rejection without state mutation and focus/delta regressions. Formatting, Clippy with warnings
+denied, and the all-target build pass. No shader changes are required. The preceding review ran the
+lighting example with synchronization validation and saw no emitted errors; interactive focus-switch
+acceptance of this amendment remains a manual check.

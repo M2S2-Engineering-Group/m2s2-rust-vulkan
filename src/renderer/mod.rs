@@ -235,8 +235,10 @@ impl VulkanRenderer {
 
     /// Set the directional ("sun") light used for subsequent frames. Takes effect on the next
     /// `render_*` call, which uploads it into that frame's light uniform.
-    pub fn set_directional_light(&mut self, light: DirectionalLight) {
-        self.directional_light = light;
+    /// Rejects invalid direction/intensity values (see `DirectionalLight`) with a validation error,
+    /// preserving the previous light.
+    pub fn set_directional_light(&mut self, light: DirectionalLight) -> Result<()> {
+        self.directional_light.set_validated(light)
     }
 
     /// Draw one frame of the caller-supplied geometry under the given transform. `model` is the

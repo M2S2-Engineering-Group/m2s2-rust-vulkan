@@ -5,7 +5,7 @@ use m2s2_rust_vulkan::{
     init_logging, Diagnostics, DirectionalLight, Index, Object, TextDraw, Vertex, VulkanRenderer,
 };
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::event::{ElementState, Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -17,7 +17,42 @@ const CUBE_CENTER_OFFSET: f32 = 1.0;
 // Free-fly camera tuning.
 const MOVE_SPEED: f32 = 3.0; // world units per second (WASD)
 const LOOK_SPEED: f32 = 1.5; // radians per second (arrow keys)
+const MAX_CAMERA_DELTA: Duration = Duration::from_millis(100);
 const MAX_PITCH: f32 = 1.553; // ~89 degrees, keeps the camera from flipping over the pole
+
+struct CameraInput {
+    held: HashSet<KeyCode>,
+    focused: bool,
+}
+
+impl CameraInput {
+    fn set_focus(&mut self, focused: bool) {
+        self.focused = focused;
+        if !focused {
+            self.held.clear();
+        }
+    }
+
+    fn set_key(&mut self, key: KeyCode, state: ElementState) {
+        match state {
+            ElementState::Pressed if self.focused => {
+                self.held.insert(key);
+            }
+            ElementState::Released => {
+                self.held.remove(&key);
+            }
+            _ => {}
+        }
+    }
+
+    fn delta(&self, elapsed: Duration) -> f32 {
+        if self.focused {
+            elapsed.min(MAX_CAMERA_DELTA).as_secs_f32()
+        } else {
+            0.0
+        }
+    }
+}
 
 /// Builds the four vertices of one cube face, each carrying the face's outward `normal` so lighting
 /// shades per face. `corners` are the face's 4 positions in CCW order as seen from outside (matching
@@ -152,7 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         direction: Vec3::new(-0.4, -1.0, -0.6),
         color: Vec3::new(1.0, 0.97, 0.9),
         ambient: Vec3::new(0.12, 0.12, 0.15),
-    });
+    })?;
 
     // The "simulation" side: a start time the cube's model matrix spins off of. This is what a game
     // engine's update step would own; the renderer only receives the resulting matrices (spec 006).
@@ -171,7 +206,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut cam_x, mut cam_y, mut cam_z) = (initial_pos[0], initial_pos[1], initial_pos[2]);
     let mut yaw = initial_yaw;
     let mut pitch = initial_pitch;
-    let mut held: HashSet<KeyCode> = HashSet::new();
+    let mut input = CameraInput {
+        held: HashSet::new(),
+        focused: true,
+    };
 
     log::info!("Starting render loop...");
     event_loop.run(move |event, elwt| {
@@ -194,29 +232,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 renderer.resize((physical_size.width, physical_size.height));
             }
             Event::WindowEvent {
+                event: WindowEvent::Focused(focused),
+                ..
+            } => {
+                input.set_focus(focused);
+            }
+            Event::WindowEvent {
                 event: WindowEvent::KeyboardInput { event, .. },
                 ..
             } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
-                    match event.state {
-                        ElementState::Pressed => {
-                            held.insert(code);
-                            if !event.repeat {
-                                match code {
-                                    KeyCode::F3 => show_diagnostics = !show_diagnostics,
-                                    KeyCode::KeyR => {
-                                        cam_x = initial_pos[0];
-                                        cam_y = initial_pos[1];
-                                        cam_z = initial_pos[2];
-                                        yaw = initial_yaw;
-                                        pitch = initial_pitch;
-                                    }
-                                    _ => {}
-                                }
+                    input.set_key(code, event.state);
+                    if event.state == ElementState::Pressed && input.focused && !event.repeat {
+                        match code {
+                            KeyCode::F3 => show_diagnostics = !show_diagnostics,
+                            KeyCode::KeyR => {
+                                cam_x = initial_pos[0];
+                                cam_y = initial_pos[1];
+                                cam_z = initial_pos[2];
+                                yaw = initial_yaw;
+                                pitch = initial_pitch;
                             }
-                        }
-                        ElementState::Released => {
-                            held.remove(&code);
+                            _ => {}
                         }
                     }
                 }
@@ -226,7 +263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let frame_dt = now.duration_since(last_frame);
                 diagnostics.update(frame_dt);
                 last_frame = now;
-                let dt = frame_dt.as_secs_f32();
+                let dt = input.delta(frame_dt);
                 let size = window.inner_size();
                 if size.width == 0 || size.height == 0 {
                     return; // minimized; nothing to draw
@@ -252,16 +289,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 ];
                 // Free-fly camera: arrow keys rotate (yaw/pitch), WASD move relative to the facing.
-                if held.contains(&KeyCode::ArrowLeft) {
+                if input.held.contains(&KeyCode::ArrowLeft) {
                     yaw -= LOOK_SPEED * dt;
                 }
-                if held.contains(&KeyCode::ArrowRight) {
+                if input.held.contains(&KeyCode::ArrowRight) {
                     yaw += LOOK_SPEED * dt;
                 }
-                if held.contains(&KeyCode::ArrowUp) {
+                if input.held.contains(&KeyCode::ArrowUp) {
                     pitch += LOOK_SPEED * dt;
                 }
-                if held.contains(&KeyCode::ArrowDown) {
+                if input.held.contains(&KeyCode::ArrowDown) {
                     pitch -= LOOK_SPEED * dt;
                 }
                 pitch = pitch.clamp(-MAX_PITCH, MAX_PITCH);
@@ -283,7 +320,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (KeyCode::KeyD, right, 1.0),
                     (KeyCode::KeyA, right, -1.0),
                 ] {
-                    if held.contains(&key) {
+                    if input.held.contains(&key) {
                         mv[0] += dir[0] * sign;
                         mv[1] += dir[1] * sign;
                         mv[2] += dir[2] * sign;
@@ -320,4 +357,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn focus_loss_clears_movement_and_look_without_sticky_keys() {
+        let mut input = CameraInput {
+            held: HashSet::new(),
+            focused: true,
+        };
+        input.set_key(KeyCode::KeyW, ElementState::Pressed);
+        input.set_key(KeyCode::ArrowLeft, ElementState::Pressed);
+        assert_eq!(input.held.len(), 2);
+        input.set_focus(true);
+        assert_eq!(input.held.len(), 2);
+        input.set_focus(false);
+        assert!(input.held.is_empty());
+        assert_eq!(input.delta(Duration::from_secs(10)), 0.0);
+        input.set_key(KeyCode::KeyW, ElementState::Pressed);
+        assert!(input.held.is_empty());
+        input.set_key(KeyCode::ArrowLeft, ElementState::Released);
+        input.set_focus(true);
+        assert!(input.held.is_empty());
+        input.set_key(KeyCode::KeyD, ElementState::Pressed);
+        assert!(input.held.contains(&KeyCode::KeyD));
+        input.set_key(KeyCode::KeyD, ElementState::Released);
+        assert!(input.held.is_empty());
+    }
+
+    #[test]
+    fn camera_delta_preserves_normal_frames_and_bounds_stalls() {
+        let input = CameraInput {
+            held: HashSet::new(),
+            focused: true,
+        };
+        for duration in [Duration::ZERO, Duration::from_millis(16), MAX_CAMERA_DELTA] {
+            assert_eq!(input.delta(duration), duration.as_secs_f32());
+        }
+        assert_eq!(
+            input.delta(Duration::from_secs(10)),
+            MAX_CAMERA_DELTA.as_secs_f32()
+        );
+        assert!(MOVE_SPEED * input.delta(Duration::from_secs(10)) <= 0.301);
+        assert!(LOOK_SPEED * input.delta(Duration::from_secs(10)) <= 0.151);
+    }
 }
