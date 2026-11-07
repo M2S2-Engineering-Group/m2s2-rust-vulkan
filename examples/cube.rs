@@ -30,46 +30,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Geometry lives in the consumer, not the library (spec 006): a unit cube centered at the
     // origin. 8 corners, one color each; 36 indices (12 triangles) wound CCW-outward to match the
     // pipeline's counter-clockwise front face + back-face culling.
+    // Placeholder per-corner normals (normalized position, 1/sqrt(3) per axis) so the type compiles
+    // and shades sanely; Task 4 replaces this 8-vertex mesh with a 24-vertex per-face one.
+    const D: f32 = 0.577_350_26;
     let vertices = [
         Vertex {
             position: Vec3::new(-0.5, -0.5, -0.5),
             color: Vec3::new(0.0, 0.0, 0.0),
             uv: Vec2::new(0.0, 0.0),
+            normal: Vec3::new(-D, -D, -D),
         },
         Vertex {
             position: Vec3::new(0.5, -0.5, -0.5),
             color: Vec3::new(1.0, 0.0, 0.0),
             uv: Vec2::new(1.0, 0.0),
+            normal: Vec3::new(D, -D, -D),
         },
         Vertex {
             position: Vec3::new(0.5, 0.5, -0.5),
             color: Vec3::new(1.0, 1.0, 0.0),
             uv: Vec2::new(1.0, 1.0),
+            normal: Vec3::new(D, D, -D),
         },
         Vertex {
             position: Vec3::new(-0.5, 0.5, -0.5),
             color: Vec3::new(0.0, 1.0, 0.0),
             uv: Vec2::new(0.0, 1.0),
+            normal: Vec3::new(-D, D, -D),
         },
         Vertex {
             position: Vec3::new(-0.5, -0.5, 0.5),
             color: Vec3::new(0.0, 0.0, 1.0),
             uv: Vec2::new(0.0, 0.0),
+            normal: Vec3::new(-D, -D, D),
         },
         Vertex {
             position: Vec3::new(0.5, -0.5, 0.5),
             color: Vec3::new(1.0, 0.0, 1.0),
             uv: Vec2::new(1.0, 0.0),
+            normal: Vec3::new(D, -D, D),
         },
         Vertex {
             position: Vec3::new(0.5, 0.5, 0.5),
             color: Vec3::new(1.0, 1.0, 1.0),
             uv: Vec2::new(1.0, 1.0),
+            normal: Vec3::new(D, D, D),
         },
         Vertex {
             position: Vec3::new(-0.5, 0.5, 0.5),
             color: Vec3::new(0.0, 1.0, 1.0),
             uv: Vec2::new(0.0, 1.0),
+            normal: Vec3::new(-D, D, D),
         },
     ];
     #[rustfmt::skip]

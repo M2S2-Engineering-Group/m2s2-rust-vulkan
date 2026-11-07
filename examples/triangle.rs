@@ -30,16 +30,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             position: Vec3::new(-0.5, -0.5, 0.0),
             color: Vec3::new(1.0, 0.0, 0.0),
             uv: Vec2::new(0.0, 0.0),
+            normal: Vec3::new(0.0, 0.0, 1.0),
         },
         Vertex {
             position: Vec3::new(0.5, -0.5, 0.0),
             color: Vec3::new(0.0, 1.0, 0.0),
             uv: Vec2::new(1.0, 0.0),
+            normal: Vec3::new(0.0, 0.0, 1.0),
         },
         Vertex {
             position: Vec3::new(0.0, 0.5, 0.0),
             color: Vec3::new(0.0, 0.0, 1.0),
             uv: Vec2::new(0.5, 1.0),
+            normal: Vec3::new(0.0, 0.0, 1.0),
         },
     ];
     let indices: [Index; 3] = [0, 1, 2];
