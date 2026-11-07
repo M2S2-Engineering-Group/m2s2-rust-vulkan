@@ -1,6 +1,6 @@
 # 012: Resource ownership and memory safety cleanup
 
-**Status**: Draft for review; not implemented.
+**Status**: Design approved (open decisions resolved 2026-11-07); ready for implementation plan; not implemented.
 **Roadmap item**: [Engine-level concerns](../ROADMAP.md#phase-5-engine-level-concerns), pulled forward
 before adding more rendering features.
 **Prerequisite**: Current renderer through spec 011, including its camera/light validation amendment.
@@ -53,9 +53,30 @@ including instance, device, allocator, swapchain, pipeline, frame context, and G
 Public modules may remain as data-type namespaces where needed, but must not expose those owners.
 `stats()` remains the supported value snapshot; do not add replacement mutable-handle getters.
 
-### Raw window construction: proposed decision
+### Window construction: decision (resolved 2026-11-07)
 
-Retain the existing constructor name and arguments, but explicitly require unsafe use:
+Provide **both** constructors, sharing one internal constructor. The safe one is the default path for
+consumers used to safe-Rust semantics; the unsafe one is the escape hatch for consumers that own their
+own window/event loop and do not want the library to hold a window reference.
+
+1. **Safe `with_window`** — upholds the window-lifetime contract *by construction* by retaining the
+   window/display owner for the renderer's lifetime, so no caller `unsafe` is needed:
+
+```rust
+impl VulkanRenderer {
+    /// Safe: the renderer retains shared ownership of `window`, so the surface's window/display
+    /// connection stays alive until after the renderer has destroyed its surface — including the
+    /// terminal-leak path below. `window` provides both handles. winit callers keep their own clone.
+    pub fn with_window<W: HasWindowHandle + HasDisplayHandle + 'static>(
+        window: std::sync::Arc<W>,
+        window_extent: (u32, u32),
+        vertices: &[Vertex],
+        indices: &[Index],
+    ) -> Result<Self>;
+}
+```
+
+2. **`unsafe fn new`** — raw handles, no retained owner, for the no-ownership consumers:
 
 ```rust
 impl VulkanRenderer {
@@ -73,14 +94,17 @@ impl VulkanRenderer {
 }
 ```
 
-Update example call sites with a small unsafe block and a concrete SAFETY comment explaining how the
-window remains alive through renderer teardown. Avoid blanket unsafe blocks around the event loop.
-Audit capture/destruction order rather than assuming closure capture order will preserve the window.
+The renderer retains the safe path's window via a type-erased owner (e.g. `Arc<dyn WindowOwner>`, a
+small internal trait combining the two handle traits — exact mechanism is the plan's call; do **not**
+make `VulkanRenderer` generic over `W`). The retained owner makes the lifetime relationship real, so
+the safe API does not merely move an unverifiable contract into documentation. Dropping/leaking the
+renderer must also drop/retain this owner (see teardown and the terminal-leak policy).
 
-A future safe constructor could retain a suitable window/display owner, but accepting a temporary
-`&impl HasWindowHandle` alone does not establish a lasting lifetime relationship. Such a constructor
-is outside this cleanup unless reviewers choose it instead of the proposed raw API. The safe API must
-not merely move an unverifiable contract into documentation.
+This softens the "library owns no window" architecture principle **only on the opt-in safe path**; the
+`unsafe fn new` path preserves strict no-ownership. Update examples: `cube.rs`/`triangle.rs` adopt the
+safe `with_window` path (holding the window in an `Arc`); keep one example or doc snippet exercising
+`unsafe fn new` with a concrete SAFETY comment. Audit capture/destruction order rather than assuming
+closure capture order preserves the window.
 
 ## Internal ownership and Vulkan objects
 
@@ -159,13 +183,16 @@ The renderer must not continue ordinary frame/upload work after a terminal synch
 Likewise, if recording/submission fails after a frame fence is reset, do not permit a retry that waits
 forever on a fence that no submission will signal.
 
-**Review decision required:** if completion cannot be established and the device is not confirmed lost,
-choose a final shutdown policy before implementing this step. Retaining/leaking the complete live
-ownership graph is preferable to freeing memory still used by the GPU, but it must include allocator,
-device, instance/loader, and any required external window/display lifetime. An unsafe raw-window
-constructor does not give the renderer ownership of the window. Do not quietly leak only child handles,
-or introduce process abort as an undocumented library side effect. This unresolved catastrophic path
-must remain an explicit review item, not a claimed safety guarantee.
+**Terminal failure policy (resolved 2026-11-07):** if completion cannot be established and the device
+is not confirmed lost, the renderer enters a **terminal "poisoned" state and deliberately leaks the
+entire live ownership graph** — allocator, device, instance/loader, and (for the safe constructor) the
+retained window/display owner. It does **not** run destruction (freeing GPU-in-use memory is worse
+than leaking), and it does **not** abort the host process (a library must not kill its caller). It logs
+the error once, and every subsequent `render_*`/`create_texture`/resize call returns a terminal error
+rather than retrying or waiting forever on a fence no submission will signal. Leaking only child
+handles is not acceptable — the leak must retain the whole graph so nothing the GPU may still touch is
+freed. For the `unsafe fn new` path the renderer does not own the window, so its SAFETY contract
+already requires the caller keep the window alive; the terminal state does not change that obligation.
 
 ## Interactions and implementation order
 
@@ -206,13 +233,21 @@ normal shutdown. Require no validation/synchronization errors and no allocator l
 paths. Error-path tests must establish the chosen retention policy rather than expecting ordinary
 cleanup on unconfirmed completion. Verify output/controls remain unchanged.
 
-## Open questions for review
+## Resolved decisions (2026-11-07)
 
-- Accept the minimal unsafe raw constructor, or retain a window/display owner to provide a safe one?
-- Agree on terminal wait-error and shutdown policy, including the external-window lifetime problem.
-- Which minimal test backend can exercise actual cleanup/failure paths without a real GPU?
-- Is the single-owner renderer the intended supported surface? This draft assumes yes; independently
-  owned public GPU resources would need a separate parent-ownership/threading design.
+- **Constructor:** provide both a safe `with_window` (retains the window owner — the default) and an
+  `unsafe fn new` (raw handles, no ownership). See "Window construction".
+- **Terminal wait-error policy:** poisoned terminal state that leaks the whole ownership graph; no
+  destruction of possibly-in-use memory, no host abort, terminal error on further calls. See
+  "Submission and failure handling".
+- **Single-owner renderer:** yes — the renderer is the sole supported owner of the GPU resource graph;
+  independently-owned public GPU resources are out of scope (would need a separate
+  parent-ownership/threading design).
+
+## Open questions (implementation detail, not design-blocking)
+
+- Which minimal test backend exercises the actual cleanup/failure paths without a real GPU (fake
+  destruction callbacks vs. a trait-abstracted device recorder)? Decide during planning/implementation.
 
 ## Outcome
 
