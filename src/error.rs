@@ -9,6 +9,10 @@ pub enum VulkanError {
     InitializationError(String),
     ValidationError(String),
     AllocationError(String),
+    /// A fence wait could not confirm GPU completion. The renderer is now in a terminal state: it has
+    /// deliberately leaked its resource graph rather than free possibly-in-use memory, and every
+    /// subsequent operation returns this error. Not recoverable (see spec 012).
+    Terminal(String),
     Other(String),
 }
 
@@ -20,6 +24,7 @@ impl fmt::Display for VulkanError {
             VulkanError::InitializationError(msg) => write!(f, "Initialization error: {msg}"),
             VulkanError::ValidationError(msg) => write!(f, "Validation error: {msg}"),
             VulkanError::AllocationError(msg) => write!(f, "Allocation error: {msg}"),
+            VulkanError::Terminal(msg) => write!(f, "Terminal renderer error: {msg}"),
             VulkanError::Other(msg) => write!(f, "Error: {msg}"),
         }
     }

@@ -154,10 +154,15 @@ impl FrameContext {
         let fence = self.in_flight_fences[frame];
         let mut needs_recreate = false;
 
-        // 1. Wait until this frame slot's previous submission has finished on the GPU.
+        // 1. Wait until this frame slot's previous submission has finished on the GPU. A wait that
+        //    cannot confirm completion is unrecoverable — poison the renderer (terminal) rather than
+        //    risk reusing resources the GPU may still hold.
         unsafe {
-            dev.wait_for_fences(&[fence], true, u64::MAX)
-                .map_err(VulkanError::from)?;
+            dev.wait_for_fences(&[fence], true, u64::MAX).map_err(|e| {
+                VulkanError::Terminal(format!(
+                    "frame fence wait could not confirm completion: {e:?}"
+                ))
+            })?;
         }
 
         // 2. Acquire the next swapchain image. image_available is signaled when it's safe to render
@@ -193,11 +198,19 @@ impl FrameContext {
         // 3b. Write this frame's camera into its uniform buffer. Safe without extra sync: the buffer is
         //     per-frame-in-flight and step 1's fence wait guarantees the GPU finished the previous
         //     use of this slot.
-        uniforms.update(frame, camera)?;
-        light.update(frame, directional_light)?;
-        if let Some(text) = text.as_deref_mut() {
-            text.update(frame, text_vertices)?;
-        }
+        // Past the fence reset the fence is unsignaled; any failure now leaves nothing to signal it,
+        // so a later frame's wait would hang. Treat every post-reset failure as terminal.
+        (|| -> Result<()> {
+            uniforms.update(frame, camera)?;
+            light.update(frame, directional_light)?;
+            if let Some(text) = text.as_deref_mut() {
+                text.update(frame, text_vertices)?;
+            }
+            Ok(())
+        })()
+        .map_err(|e| {
+            VulkanError::Terminal(format!("frame update failed after fence reset: {e}"))
+        })?;
 
         // 4. Record the command buffer.
         self.record(
@@ -217,7 +230,10 @@ impl FrameContext {
             text.as_deref(),
             frame,
             text_vertices.len() as u32,
-        )?;
+        )
+        .map_err(|e| {
+            VulkanError::Terminal(format!("frame recording failed after fence reset: {e}"))
+        })?;
 
         // 5. Submit: wait on image_available at the color-write stage, signal render_finished,
         //    and signal `fence` on completion so step 1 can reclaim this slot next cycle.
@@ -232,7 +248,9 @@ impl FrameContext {
             .signal_semaphores(&signal_semaphores);
         unsafe {
             dev.queue_submit(device.graphics_queue, &[submit_info], fence)
-                .map_err(VulkanError::from)?;
+                .map_err(|e| {
+                    VulkanError::Terminal(format!("queue submit failed after fence reset: {e:?}"))
+                })?;
         }
 
         // 6. Present: wait on render_finished so the display engine doesn't show a half-drawn

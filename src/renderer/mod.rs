@@ -10,6 +10,7 @@ pub mod instance;
 pub mod light;
 pub(crate) mod per_frame_uniform;
 pub mod pipeline;
+pub(crate) mod submission;
 pub mod swapchain;
 pub mod text;
 pub mod texture;
@@ -22,6 +23,7 @@ use ash::vk;
 use light::{DirectionalLight, Light};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use std::sync::Arc;
+use submission::SubmitState;
 
 /// A retained window/display owner the renderer keeps alive for its whole lifetime, so the safe
 /// `with_window` constructor upholds the surface's window-lifetime contract by construction. Blanket-
@@ -89,6 +91,9 @@ pub struct VulkanRenderer {
     // frame. Like `uniforms`, freed via explicit `destroy` in `Drop` before the allocator.
     pub(crate) light: Option<Light>,
     pub(crate) directional_light: DirectionalLight,
+    // Terminal when a fence wait could not confirm GPU completion: the renderer then leaks its whole
+    // resource graph in `Drop` and every public operation returns `VulkanError::Terminal`.
+    submit_state: SubmitState,
     pub(crate) allocator: ManuallyDrop<allocator::Allocator>,
     // Retained window/display owner from the safe `with_window` constructor (None for the unsafe
     // raw-handle `new`). Kept alive for the renderer's whole lifetime so the surface's window stays
@@ -305,6 +310,7 @@ impl VulkanRenderer {
             texture_sets: Vec::new(),
             light: Some(light),
             directional_light: DirectionalLight::default(),
+            submit_state: SubmitState::NotSubmitted,
             allocator: ManuallyDrop::new(allocator),
             _window: window,
             pending_resize: None,
@@ -330,6 +336,18 @@ impl VulkanRenderer {
     /// preserving the previous light.
     pub fn set_directional_light(&mut self, light: DirectionalLight) -> Result<()> {
         self.directional_light.set_validated(light)
+    }
+
+    /// Reject any operation once the renderer has entered its terminal (poisoned) state — a fence wait
+    /// could not confirm GPU completion, so the resource graph has been leaked rather than freed and
+    /// nothing may be reused.
+    fn ensure_not_terminal(&self) -> Result<()> {
+        if self.submit_state.is_terminal() {
+            return Err(VulkanError::Terminal(
+                "renderer is in a terminal state after a failed GPU fence wait".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Draw one frame of the caller-supplied geometry under the given transform. `model` is the
@@ -361,6 +379,7 @@ impl VulkanRenderer {
         proj: Mat4,
         text: &[text::TextDraw<'_>],
     ) -> Result<()> {
+        self.ensure_not_terminal()?;
         if let Some((width, height)) = self.pending_resize {
             if width == 0 || height == 0 {
                 // Minimized: can't build a swapchain. Keep the pending size and skip drawing.
@@ -424,7 +443,7 @@ impl VulkanRenderer {
             )?);
         }
         let camera = uniform::CameraUniforms { view, proj };
-        let outcome = self.frame_context.draw_frame(
+        let outcome = match self.frame_context.draw_frame(
             &self.device,
             &self.pipeline,
             &self.swapchain,
@@ -440,7 +459,15 @@ impl VulkanRenderer {
             self.white_set,
             self.text_renderer.as_mut(),
             &self.text_vertices,
-        )?;
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if matches!(error, VulkanError::Terminal(_)) {
+                    self.submit_state = SubmitState::Terminal;
+                }
+                return Err(error);
+            }
+        };
         if outcome.submitted() {
             self.scene_draw_calls = objects.len();
             self.submitted_indices =
@@ -493,6 +520,7 @@ impl VulkanRenderer {
         width: u32,
         height: u32,
     ) -> Result<texture::TextureId> {
+        self.ensure_not_terminal()?;
         let stored = StoredTexture::new(
             &self.device,
             &mut self.allocator,
@@ -510,6 +538,28 @@ impl VulkanRenderer {
 
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
+        // Terminal state: a fence wait could not confirm GPU completion, so freeing anything risks
+        // releasing memory the GPU may still touch. Deliberately leak the entire resource graph
+        // (every owner, incl. the retained window) rather than free or abort. See spec 012.
+        if self.submit_state.is_terminal() {
+            log::error!(
+                "renderer in terminal state: leaking the GPU resource graph to avoid freeing \
+                 possibly in-use memory"
+            );
+            std::mem::forget(self.uniforms.take());
+            std::mem::forget(self.light.take());
+            std::mem::forget(self.depth.take());
+            std::mem::forget(self.vertex_buffer.take());
+            std::mem::forget(self.index_buffer.take());
+            std::mem::forget(self.white_texture.take());
+            std::mem::forget(self.text_renderer.take());
+            std::mem::forget(std::mem::take(&mut self.textures));
+            std::mem::forget(self._window.take());
+            // The `ManuallyDrop` owners (instance/device/swapchain/pipeline/frame_context/allocator)
+            // are intentionally never dropped here, so they leak too.
+            return;
+        }
+
         log::info!("Destroying Vulkan renderer");
         let _ = self.wait_idle();
 
