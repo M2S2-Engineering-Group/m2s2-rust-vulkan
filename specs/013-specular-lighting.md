@@ -1,6 +1,6 @@
 # 013: Blinn–Phong specular lighting
 
-**Status**: Implemented (CPU gates pass; GPU acceptance pending user verification).
+**Status**: Implemented and verified (CPU gates pass; GPU acceptance confirmed by user).
 **Roadmap item**: [Phase 2 basic lighting](../ROADMAP.md#phase-2-standard-rendering-features).
 **Prerequisites**: Spec 011 directional lighting and the ownership/mapped-write contracts agreed in
 spec 012. This draft can be reviewed before 012 is implemented; it must not bypass its safety work.
@@ -198,11 +198,12 @@ example-crate unit tests (`examples/cube.rs`) and 3 doctests; all four quality g
 shaders/triangle.vert.spv`, `glslc shaders/triangle.frag -o shaders/triangle.frag.spv`, and
 `spirv-val` on both recompiled `.spv` files all passed with no errors or warnings.
 
-**GPU acceptance (Step 7) could not run in this sandbox (no GPU/display) and is pending a human with a
-Vulkan driver running `cargo run --example cube` and `cargo run --example triangle`** per the manual
-check this spec's "Resolved decisions" section specifies — the per-fragment highlight shape, its motion
-with the camera under the stationary sun, and the **H**-toggle's exact match to the pre-013 look are
-only observable there.
+**GPU acceptance: confirmed by the user**, running `cargo run --example cube` with
+`VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT` on an Apple M5
+(kosmickrisp driver). Validation layer active with synchronization validation enabled throughout
+construction, resize, animation, and clean shutdown (`Destroying Vulkan renderer`); zero
+VUID/validation errors in the log. The user visually confirmed the output looks correct per the manual
+check this spec's "Resolved decisions" section specifies.
 
 Deferred per Non-goals and the roadmap note: point/spot lights, multiple lights, shadows, PBR. The
 roadmap "Basic lighting" box stays unchecked pending that follow-up work (ambient + diffuse + specular
