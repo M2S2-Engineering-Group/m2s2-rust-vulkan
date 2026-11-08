@@ -19,13 +19,20 @@ layout(location = 3) in vec3 inNormal;
 layout(location = 0) out vec3 fragColor;
 layout(location = 1) out vec2 fragUV;
 layout(location = 2) out vec3 fragNormal;
+layout(location = 3) out vec3 fragWorldPos;
 
 void main() {
-    gl_Position = camera.proj * camera.view * object.model * vec4(inPosition, 1.0);
+    vec4 worldPos = object.model * vec4(inPosition, 1.0);
+    gl_Position = camera.proj * camera.view * worldPos;
     fragColor = inColor;
     fragUV = inUV;
+    fragWorldPos = worldPos.xyz;
     // Normal matrix (inverse-transpose of the model's upper-left 3x3) keeps normals perpendicular
     // to the surface under non-uniform scale; correct for rotation/translation too.
     mat3 normalMatrix = transpose(inverse(mat3(object.model)));
-    fragNormal = normalize(normalMatrix * inNormal);
+    // Interpolating two already-unit vectors across a triangle doesn't yield a unit vector at each
+    // pixel anyway, and pre-normalizing here would discard the relative-magnitude information
+    // non-uniform scale encodes in the transformed normal. Normalize once, after interpolation, in
+    // the fragment shader.
+    fragNormal = normalMatrix * inNormal;
 }

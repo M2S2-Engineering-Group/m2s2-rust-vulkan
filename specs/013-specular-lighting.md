@@ -1,6 +1,6 @@
 # 013: Blinn–Phong specular lighting
 
-**Status**: Design approved (open decisions resolved 2026-11-08); ready for implementation plan; not implemented.
+**Status**: Implemented (CPU gates pass; GPU acceptance pending user verification).
 **Roadmap item**: [Phase 2 basic lighting](../ROADMAP.md#phase-2-standard-rendering-features).
 **Prerequisites**: Spec 011 directional lighting and the ownership/mapped-write contracts agreed in
 spec 012. This draft can be reviewed before 012 is implemented; it must not bypass its safety work.
@@ -168,7 +168,45 @@ None blocking. Everything above was a design-blocking decision; all are resolved
 
 ## Outcome
 
-(Filled in after implementation.)
+Implemented across two tasks: Task 1 (`dc086e4`) landed every Rust-side data type, GPU layout, and
+validation change without touching the shaders — `Camera { view, proj, position }` replaced the
+separate view/projection render arguments, `SpecularMaterial { color, shininess }` was added to
+`Object`, `CameraUniforms` grew to 144 bytes (`view`/`proj`/`position`/`_pad` at 0/64/128/140), and
+`ModelPushConstants` grew to 80 bytes (`model`/`specular_color`/`shininess` at 0/64/76) — so after
+Task 1 the renderer sent the new bytes but the old shaders ignored them and the render was visually
+unchanged. Task 2 (this commit) is the other half: `shaders/triangle.vert` gained a world-position
+varying (`fragWorldPos`, location 3) and stopped pre-normalizing `fragNormal` (normalizing once, after
+interpolation, in the fragment shader instead — per spec, pre-normalizing both discards non-uniform-
+scale information and doesn't guarantee a unit vector post-interpolation anyway).
+`shaders/triangle.frag` added a minimal camera block reading only `position` (explicit `offset = 128`,
+no `row_major` — no matrix member) and a material push-constant subset reading `specularColor`/
+`shininess` (explicit `offset = 64`/`76`), then computes the guarded Blinn-Phong term exactly as
+specified: `ndotl > 0`, then `dot(N,V) > 0`, then a safe halfway length (named minimum squared length
+`1e-12`), added to `shade * albedo` without tinting the highlight by albedo/vertex color, alpha staying
+`texture.a`. The cube example (`examples/cube.rs`) got a `highlights_enabled` bool (default `true`,
+toggled by **H**, same pattern as **F3**'s `show_diagnostics`) that switches both cubes between
+identical white specular color at shininess 16/64 (broad vs. sharp highlight) and
+`SpecularMaterial::default()` (zero color, reproducing the pre-013 diffuse-only look exactly) on each
+object.
+
+Verified (CPU): 61 unit tests pass (incl. `renderer::pipeline::tests::*_spirv_parses_and_starts_with_magic`
+against the recompiled binaries, `renderer::uniform`'s 144-byte layout tests, and
+`renderer::texture::tests::specular_material_default_matches_pre_013_look` from Task 1), plus 2
+example-crate unit tests (`examples/cube.rs`) and 3 doctests; all four quality gates
+(`cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+`cargo test --all-targets`, `cargo test --doc`) clean. `glslc shaders/triangle.vert -o
+shaders/triangle.vert.spv`, `glslc shaders/triangle.frag -o shaders/triangle.frag.spv`, and
+`spirv-val` on both recompiled `.spv` files all passed with no errors or warnings.
+
+**GPU acceptance (Step 7) could not run in this sandbox (no GPU/display) and is pending a human with a
+Vulkan driver running `cargo run --example cube` and `cargo run --example triangle`** per the manual
+check this spec's "Resolved decisions" section specifies — the per-fragment highlight shape, its motion
+with the camera under the stationary sun, and the **H**-toggle's exact match to the pre-013 look are
+only observable there.
+
+Deferred per Non-goals and the roadmap note: point/spot lights, multiple lights, shadows, PBR. The
+roadmap "Basic lighting" box stays unchecked pending that follow-up work (ambient + diffuse + specular
++ normals are now done).
 
 ## References
 

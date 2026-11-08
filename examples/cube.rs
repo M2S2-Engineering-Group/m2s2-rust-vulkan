@@ -197,6 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_frame = start;
     let mut diagnostics = Diagnostics::default();
     let mut show_diagnostics = true;
+    let mut highlights_enabled = true;
 
     // Free-fly camera state. Initial pose sits back from the scene looking at the origin; the initial
     // yaw/pitch are derived from that look direction so "reset" (R) returns here exactly.
@@ -248,6 +249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if event.state == ElementState::Pressed && input.focused && !event.repeat {
                         match code {
                             KeyCode::F3 => show_diagnostics = !show_diagnostics,
+                            KeyCode::KeyH => highlights_enabled = !highlights_enabled,
                             KeyCode::KeyR => {
                                 cam_x = initial_pos[0];
                                 cam_y = initial_pos[1];
@@ -280,16 +282,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     translate(&Vec3::new(CUBE_CENTER_OFFSET, 0.0, -0.4))
                         * rotate(&Vec3::new(1.0, 0.0, 0.0), -angle * 0.7),
                 ];
+                let specular = if highlights_enabled {
+                    [
+                        SpecularMaterial {
+                            color: Vec3::new(1.0, 1.0, 1.0),
+                            shininess: 16.0,
+                        },
+                        SpecularMaterial {
+                            color: Vec3::new(1.0, 1.0, 1.0),
+                            shininess: 64.0,
+                        },
+                    ]
+                } else {
+                    [SpecularMaterial::default(), SpecularMaterial::default()]
+                };
                 let objects = [
                     Object {
                         model: models[0],
                         texture: Some(tex_a),
-                        specular: SpecularMaterial::default(),
+                        specular: specular[0],
                     },
                     Object {
                         model: models[1],
                         texture: Some(tex_b),
-                        specular: SpecularMaterial::default(),
+                        specular: specular[1],
                     },
                 ];
                 // Free-fly camera: arrow keys rotate (yaw/pitch), WASD move relative to the facing.

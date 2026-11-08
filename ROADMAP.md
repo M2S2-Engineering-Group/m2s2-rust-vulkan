@@ -62,8 +62,10 @@ What separates "a triangle renders" from "a usable rendering engine" for simple 
 - [ ] **Basic lighting**: Phong/Blinn-Phong (ambient + diffuse + specular), normals, one or more point/
       directional lights. _Partially done_ — [spec 011](specs/011-directional-lighting.md) implemented
       per-vertex normals and a single directional ("sun") light with per-pixel diffuse + ambient
-      shading (plus the cube example's free-fly camera). Specular, and point/spot/multiple lights,
-      remain; box stays unchecked until those land.
+      shading (plus the cube example's free-fly camera), and
+      [spec 013](specs/013-specular-lighting.md) added the Blinn-Phong specular highlight (per-object
+      color/shininess, camera-dependent) on top of it. Ambient + diffuse + specular + normals are now
+      done; point/spot lights and multiple lights remain — box stays unchecked until those land.
 
 **Milestone**: a lit, textured 3D scene with a movable camera and more than one object.
 
