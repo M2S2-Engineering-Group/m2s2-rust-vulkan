@@ -3,7 +3,7 @@
 // examples/cube.rs.
 
 use m2s2_rust_vulkan::math::{look_at, perspective, to_radians, Mat4, Vec2, Vec3};
-use m2s2_rust_vulkan::{init_logging, Index, Vertex, VulkanRenderer};
+use m2s2_rust_vulkan::{init_logging, Camera, Index, Vertex, VulkanRenderer};
 use std::sync::Arc;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -86,14 +86,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // A fixed camera looking at the origin from +Z; the triangle doesn't move, so its
                 // model matrix is the identity.
                 let model = Mat4::IDENTITY;
+                let camera_position = Vec3::new(0.0, 0.0, 2.0);
                 let view = look_at(
-                    &Vec3::new(0.0, 0.0, 2.0),
+                    &camera_position,
                     &Vec3::new(0.0, 0.0, 0.0),
                     &Vec3::new(0.0, 1.0, 0.0),
                 );
                 let proj = perspective(to_radians(45.0), aspect, 0.1, 10.0);
 
-                if let Err(e) = renderer.render_frame(model, view, proj) {
+                if let Err(e) = renderer.render_frame(
+                    model,
+                    Camera {
+                        view,
+                        proj,
+                        position: camera_position,
+                    },
+                ) {
                     log::error!("Render error: {e}");
                 }
             }

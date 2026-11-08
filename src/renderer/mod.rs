@@ -31,7 +31,7 @@ use submission::SubmitState;
 pub(crate) trait WindowOwner: HasWindowHandle + HasDisplayHandle {}
 impl<T: HasWindowHandle + HasDisplayHandle> WindowOwner for T {}
 use std::mem::ManuallyDrop;
-use texture::{Object, StoredTexture};
+use texture::{validate_specular, Object, SpecularMaterial, StoredTexture};
 
 /// The Vulkan renderer. Owns the whole GPU resource graph; its fields and low-level owners are
 /// private. Construct it with [`VulkanRenderer::with_window`] (safe) or [`VulkanRenderer::new`]
@@ -361,35 +361,40 @@ impl VulkanRenderer {
     }
 
     /// Draw one frame of the caller-supplied geometry under the given transform. `model` is the
-    /// object's world-space transform (what the caller's simulation produces), `view`/`proj` the
-    /// camera — the renderer combines them as `proj * view * model` in the vertex shader.
-    pub fn render_frame(&mut self, model: Mat4, view: Mat4, proj: Mat4) -> Result<()> {
+    /// object's world-space transform (what the caller's simulation produces); `camera` carries the
+    /// view/projection matrices plus world-space eye position — the renderer combines model/view/proj
+    /// as `proj * view * model` in the vertex shader.
+    pub fn render_frame(&mut self, model: Mat4, camera: uniform::Camera) -> Result<()> {
         self.render_objects(
             &[Object {
                 model,
                 texture: None,
+                specular: SpecularMaterial::default(),
             }],
-            view,
-            proj,
+            camera,
         )
     }
 
-    /// Draw one copy of the uploaded mesh per object (with its own transform and texture) under a
-    /// shared camera. An empty slice clears and presents the frame without drawing geometry.
-    pub fn render_objects(&mut self, objects: &[Object], view: Mat4, proj: Mat4) -> Result<()> {
-        self.render_objects_with_text(objects, view, proj, &[])
+    /// Draw one copy of the uploaded mesh per object (with its own transform, texture, and specular
+    /// material) under a shared camera. An empty slice clears and presents the frame without drawing
+    /// geometry.
+    pub fn render_objects(&mut self, objects: &[Object], camera: uniform::Camera) -> Result<()> {
+        self.render_objects_with_text(objects, camera, &[])
     }
 
     /// Draw scene geometry, then screen-space text. Text is borrowed for this frame only.
-    /// Invalid text/overflow returns an error before acquiring or submitting a frame.
+    /// Invalid text/overflow/camera/material returns an error before acquiring or submitting a frame.
     pub fn render_objects_with_text(
         &mut self,
         objects: &[Object],
-        view: Mat4,
-        proj: Mat4,
+        camera: uniform::Camera,
         text: &[text::TextDraw<'_>],
     ) -> Result<()> {
         self.ensure_not_terminal()?;
+        uniform::validate_camera(&camera)?;
+        for object in objects {
+            validate_specular(&object.specular)?;
+        }
         if let Some((width, height)) = self.pending_resize {
             if width == 0 || height == 0 {
                 // Minimized: can't build a swapchain. Keep the pending size and skip drawing.
@@ -452,7 +457,7 @@ impl VulkanRenderer {
                 self.depth.as_ref().unwrap().format(),
             )?);
         }
-        let camera = uniform::CameraUniforms { view, proj };
+        let camera_uniforms = uniform::CameraUniforms::from(&camera);
         let outcome = self.frame_context.draw_frame(
             &self.device,
             &self.pipeline,
@@ -461,7 +466,7 @@ impl VulkanRenderer {
             self.uniforms.as_mut().unwrap(),
             self.vertex_buffer.as_ref().unwrap(),
             self.index_buffer.as_ref().unwrap(),
-            &camera,
+            &camera_uniforms,
             self.light.as_mut().unwrap(),
             &self.directional_light,
             objects,

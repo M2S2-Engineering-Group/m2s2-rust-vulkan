@@ -516,6 +516,8 @@ fn emit_object_draws(
         emit(ObjectCommand::BindTexture(set));
         let constants = ModelPushConstants {
             model: object.model,
+            specular_color: object.specular.color,
+            shininess: object.specular.shininess,
         };
         emit(ObjectCommand::PushModel(bytemuck::bytes_of(&constants)));
         emit(ObjectCommand::DrawIndexed(index_count));
@@ -574,6 +576,7 @@ impl Drop for FrameContext {
 
 #[cfg(test)]
 mod tests {
+    use super::super::texture::SpecularMaterial;
     use super::*;
     use ash::vk::Handle;
 
@@ -615,14 +618,21 @@ mod tests {
         let sets = [set(0xA0), set(0xB0)];
         let m0 = crate::math::translate(&crate::math::Vec3::new(1.0, 0.0, 0.0));
         let m1 = crate::math::rotate(&crate::math::Vec3::new(0.0, 1.0, 0.0), 0.5);
+        let specular0 = SpecularMaterial::default();
+        let specular1 = SpecularMaterial {
+            color: crate::math::Vec3::new(1.0, 1.0, 1.0),
+            shininess: 64.0,
+        };
         let objects = [
             Object {
                 model: m0,
                 texture: None,
+                specular: specular0,
             },
             Object {
                 model: m1,
                 texture: Some(crate::renderer::texture::TextureId(1)),
+                specular: specular1,
             },
         ];
         assert_eq!(
@@ -630,12 +640,22 @@ mod tests {
             vec![
                 RecordedCommand::Bind(white),
                 RecordedCommand::Push(
-                    bytemuck::bytes_of(&ModelPushConstants { model: m0 }).to_vec()
+                    bytemuck::bytes_of(&ModelPushConstants {
+                        model: m0,
+                        specular_color: specular0.color,
+                        shininess: specular0.shininess,
+                    })
+                    .to_vec()
                 ),
                 RecordedCommand::Draw(36),
                 RecordedCommand::Bind(sets[1]),
                 RecordedCommand::Push(
-                    bytemuck::bytes_of(&ModelPushConstants { model: m1 }).to_vec()
+                    bytemuck::bytes_of(&ModelPushConstants {
+                        model: m1,
+                        specular_color: specular1.color,
+                        shininess: specular1.shininess,
+                    })
+                    .to_vec()
                 ),
                 RecordedCommand::Draw(36),
             ]

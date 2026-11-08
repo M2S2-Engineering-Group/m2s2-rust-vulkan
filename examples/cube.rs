@@ -2,7 +2,8 @@ use m2s2_rust_vulkan::math::{
     look_at, perspective, rotate, to_radians, translate, Vec2, Vec3, Vec4,
 };
 use m2s2_rust_vulkan::{
-    init_logging, Diagnostics, DirectionalLight, Index, Object, TextDraw, Vertex, VulkanRenderer,
+    init_logging, Camera, Diagnostics, DirectionalLight, Index, Object, SpecularMaterial, TextDraw,
+    Vertex, VulkanRenderer,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -283,10 +284,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Object {
                         model: models[0],
                         texture: Some(tex_a),
+                        specular: SpecularMaterial::default(),
                     },
                     Object {
                         model: models[1],
                         texture: Some(tex_b),
+                        specular: SpecularMaterial::default(),
                     },
                 ];
                 // Free-fly camera: arrow keys rotate (yaw/pitch), WASD move relative to the facing.
@@ -348,7 +351,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     color: Vec4::new(1.0, 1.0, 1.0, 1.0),
                 }];
                 let text = if show_diagnostics { &text[..] } else { &[] };
-                if let Err(e) = renderer.render_objects_with_text(&objects, view, proj, text) {
+                let camera = Camera {
+                    view,
+                    proj,
+                    position: camera_position,
+                };
+                if let Err(e) = renderer.render_objects_with_text(&objects, camera, text) {
                     log::error!("Render error: {e}");
                     elwt.exit();
                 }

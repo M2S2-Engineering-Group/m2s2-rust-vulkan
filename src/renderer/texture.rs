@@ -2,7 +2,7 @@
 use super::{allocator::Allocator, device::VulkanDevice, image::SampledImage};
 use crate::{
     error::{Result, VulkanError},
-    math::Mat4,
+    math::{Mat4, Vec3},
 };
 use ash::vk;
 
@@ -11,11 +11,48 @@ use ash::vk;
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct TextureId(pub(super) usize);
 
+/// Per-object Blinn-Phong specular parameters (spec 013). `color` tints the highlight; `shininess`
+/// controls its tightness (higher = smaller, sharper highlight).
+#[derive(Copy, Clone, Debug)]
+pub struct SpecularMaterial {
+    pub color: Vec3,
+    pub shininess: f32,
+}
+
+impl Default for SpecularMaterial {
+    /// No highlight (`color` black) and a moderate shininess exponent — reproduces the pre-013 look
+    /// until a caller opts in with a non-black color.
+    fn default() -> Self {
+        Self {
+            color: Vec3::new(0.0, 0.0, 0.0),
+            shininess: 32.0,
+        }
+    }
+}
+
+/// Validate a `SpecularMaterial` before any GPU work: `color` components must be finite and
+/// nonnegative; `shininess` must be finite and at least 1.0 (the minimum meaningful Blinn-Phong
+/// exponent).
+pub(crate) fn validate_specular(material: &SpecularMaterial) -> Result<()> {
+    if !(0..3).all(|i| material.color[i].is_finite() && material.color[i] >= 0.0) {
+        return Err(VulkanError::ValidationError(
+            "specular color must be finite and nonnegative".into(),
+        ));
+    }
+    if !(material.shininess.is_finite() && material.shininess >= 1.0) {
+        return Err(VulkanError::ValidationError(
+            "specular shininess must be finite and at least 1.0".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// One drawn copy of the uploaded mesh. `texture: None` samples the renderer's 1x1 white default,
 /// so an untextured object reproduces the pre-texture look (`white * vertexColor == vertexColor`).
 pub struct Object {
     pub model: Mat4,
     pub texture: Option<TextureId>,
+    pub specular: SpecularMaterial,
 }
 
 const TEXTURE_BINDING: u32 = 0;
@@ -133,7 +170,39 @@ pub(super) fn resolve_texture_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::Vec3;
     use ash::vk::Handle; // brings `from_raw` into scope
+
+    #[test]
+    fn specular_material_default_matches_pre_013_look() {
+        let m = SpecularMaterial::default();
+        assert_eq!((m.color, m.shininess), (Vec3::new(0.0, 0.0, 0.0), 32.0));
+    }
+
+    #[test]
+    fn validate_specular_rejects_invalid_color_and_shininess() {
+        let base = SpecularMaterial::default();
+        assert!(validate_specular(&base).is_ok());
+        for bad in [-1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for i in 0..3 {
+                let mut m = base;
+                m.color[i] = bad;
+                assert!(validate_specular(&m).is_err());
+            }
+        }
+        for bad_shininess in [0.0, 0.5, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(validate_specular(&SpecularMaterial {
+                color: base.color,
+                shininess: bad_shininess
+            })
+            .is_err());
+        }
+        assert!(validate_specular(&SpecularMaterial {
+            color: base.color,
+            shininess: 1.0
+        })
+        .is_ok());
+    }
 
     fn set(raw: u64) -> vk::DescriptorSet {
         vk::DescriptorSet::from_raw(raw)

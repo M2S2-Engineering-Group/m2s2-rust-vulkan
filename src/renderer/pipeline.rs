@@ -4,6 +4,7 @@
 
 use crate::error::{Result, VulkanError};
 use crate::math::Mat4;
+use crate::math::Vec3;
 use crate::renderer::buffer::Vertex;
 use crate::renderer::device::VulkanDevice;
 use ash::vk;
@@ -14,16 +15,22 @@ use std::io::Cursor;
 const VERTEX_SHADER: &[u8] = include_bytes!("../../shaders/triangle.vert.spv");
 const FRAGMENT_SHADER: &[u8] = include_bytes!("../../shaders/triangle.frag.spv");
 
-/// Per-draw model transform, copied into command state before each indexed draw.
+/// Per-draw model transform plus specular material, copied into command state before each indexed
+/// draw. `specular_color` lands at offset 64 with no gaps (`Mat4` is a clean 64-byte multiple, which
+/// already satisfies `Vec3`'s 16-byte GLSL alignment requirement).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct ModelPushConstants {
     pub model: Mat4,
+    pub specular_color: Vec3,
+    pub shininess: f32,
 }
 
 pub(crate) const MODEL_PUSH_OFFSET: u32 = 0;
 pub(crate) const MODEL_PUSH_SIZE: u32 = std::mem::size_of::<ModelPushConstants>() as u32;
-pub(crate) const MODEL_PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::VERTEX;
+pub(crate) const MODEL_PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
+    vk::ShaderStageFlags::VERTEX.as_raw() | vk::ShaderStageFlags::FRAGMENT.as_raw(),
+);
 
 fn model_push_range() -> vk::PushConstantRange {
     vk::PushConstantRange::default()
@@ -274,12 +281,17 @@ mod tests {
 
     #[test]
     fn model_payload_and_range_match_shader_layout() {
-        assert_eq!(std::mem::size_of::<ModelPushConstants>(), 64);
+        assert_eq!(std::mem::size_of::<ModelPushConstants>(), 80);
         assert_eq!(std::mem::offset_of!(ModelPushConstants, model), 0);
+        assert_eq!(std::mem::offset_of!(ModelPushConstants, specular_color), 64);
+        assert_eq!(std::mem::offset_of!(ModelPushConstants, shininess), 76);
         let range = model_push_range();
         assert_eq!(range.offset, 0);
-        assert_eq!(range.size, 64);
-        assert_eq!(range.stage_flags, vk::ShaderStageFlags::VERTEX);
+        assert_eq!(range.size, 80);
+        assert_eq!(
+            range.stage_flags,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT
+        );
     }
 
     #[test]

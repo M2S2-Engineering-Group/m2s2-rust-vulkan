@@ -7,7 +7,8 @@ pub use renderer::buffer::{Index, Vertex};
 pub use renderer::diagnostics::{Diagnostics, RenderStatus, RendererStats};
 pub use renderer::light::DirectionalLight;
 pub use renderer::text::TextDraw;
-pub use renderer::texture::{Object, TextureId};
+pub use renderer::texture::{Object, SpecularMaterial, TextureId};
+pub use renderer::uniform::Camera;
 pub use renderer::VulkanRenderer;
 // Re-exported so consumers can name the handle types `VulkanRenderer::new` takes without
 // depending on `raw-window-handle` directly.
