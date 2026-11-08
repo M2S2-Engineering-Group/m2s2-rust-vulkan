@@ -45,11 +45,44 @@ impl SubmitState {
     pub(crate) fn is_terminal(self) -> bool {
         matches!(self, SubmitState::Terminal)
     }
+
+    /// Fold a just-observed operation result's error into the state: a `VulkanError::Terminal`
+    /// poisons the renderer from any state; any other error (or none) leaves it unchanged. This is
+    /// the single place the renderer decides it has gone terminal, whichever GPU op raised it.
+    pub(crate) fn poisoned_by(self, error: &crate::error::VulkanError) -> SubmitState {
+        if matches!(error, crate::error::VulkanError::Terminal(_)) {
+            SubmitState::Terminal
+        } else {
+            self
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_by_goes_terminal_only_on_terminal_errors() {
+        use crate::error::VulkanError;
+        let terminal = VulkanError::Terminal("wait failed".into());
+        let ordinary = VulkanError::ValidationError("bad input".into());
+        // A terminal error poisons from any non-terminal state...
+        assert_eq!(
+            SubmitState::NotSubmitted.poisoned_by(&terminal),
+            SubmitState::Terminal
+        );
+        // ...an ordinary error leaves the state unchanged...
+        assert_eq!(
+            SubmitState::NotSubmitted.poisoned_by(&ordinary),
+            SubmitState::NotSubmitted
+        );
+        // ...and terminal is sticky.
+        assert_eq!(
+            SubmitState::Terminal.poisoned_by(&ordinary),
+            SubmitState::Terminal
+        );
+    }
 
     #[test]
     fn wait_failure_after_submit_is_terminal_and_blocks_release() {

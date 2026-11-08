@@ -350,6 +350,16 @@ impl VulkanRenderer {
         Ok(())
     }
 
+    /// Record a just-finished GPU operation's result: a terminal failure (from any entry point — a
+    /// frame or an upload) poisons the renderer so every later call is rejected and `Drop` leaks the
+    /// graph. Returns the result unchanged. The single place terminal-ness is entered.
+    fn guard<T>(&mut self, result: Result<T>) -> Result<T> {
+        if let Err(error) = &result {
+            self.submit_state = self.submit_state.poisoned_by(error);
+        }
+        result
+    }
+
     /// Draw one frame of the caller-supplied geometry under the given transform. `model` is the
     /// object's world-space transform (what the caller's simulation produces), `view`/`proj` the
     /// camera — the renderer combines them as `proj * view * model` in the vertex shader.
@@ -443,7 +453,7 @@ impl VulkanRenderer {
             )?);
         }
         let camera = uniform::CameraUniforms { view, proj };
-        let outcome = match self.frame_context.draw_frame(
+        let outcome = self.frame_context.draw_frame(
             &self.device,
             &self.pipeline,
             &self.swapchain,
@@ -459,15 +469,8 @@ impl VulkanRenderer {
             self.white_set,
             self.text_renderer.as_mut(),
             &self.text_vertices,
-        ) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                if matches!(error, VulkanError::Terminal(_)) {
-                    self.submit_state = SubmitState::Terminal;
-                }
-                return Err(error);
-            }
-        };
+        );
+        let outcome = self.guard(outcome)?;
         if outcome.submitted() {
             self.scene_draw_calls = objects.len();
             self.submitted_indices =
@@ -528,7 +531,8 @@ impl VulkanRenderer {
             rgba8,
             width,
             height,
-        )?;
+        );
+        let stored = self.guard(stored)?;
         let id = texture::TextureId(self.textures.len());
         self.texture_sets.push(stored.set);
         self.textures.push(stored);

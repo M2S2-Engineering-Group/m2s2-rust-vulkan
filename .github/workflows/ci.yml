@@ -33,6 +33,10 @@ jobs:
       - name: cargo test
         run: cargo test --all-targets
 
+      # --all-targets skips doctests, which carry the compile-fail encapsulation checks (spec 012).
+      - name: cargo test --doc
+        run: cargo test --doc
+
   commit-lint:
     name: conventional commits
     runs-on: ubuntu-latest

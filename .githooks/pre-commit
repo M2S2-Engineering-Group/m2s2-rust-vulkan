@@ -11,4 +11,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 echo "pre-commit: cargo test"
 cargo test --all-targets
 
+echo "pre-commit: cargo test --doc"
+# --all-targets skips doctests, which carry the compile-fail encapsulation checks (spec 012).
+cargo test --doc
+
 echo "pre-commit: ok"
