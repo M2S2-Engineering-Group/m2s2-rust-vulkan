@@ -74,7 +74,7 @@ Text positions use physical pixels from the top-left; scale multiplies an 8×8 b
 Supply text each frame; an empty slice hides it. Existing single/multiple-object calls still work.
 
 ```rust,ignore
-use m2s2_rust_vulkan::TextDraw;
+use m2s2_rust_vulkan::{Camera, TextDraw};
 use m2s2_rust_vulkan::math::{Vec2, Vec4};
 
 // Keep Diagnostics between frames; the caller measures CPU frame interval and owns the camera.
@@ -86,7 +86,12 @@ let text = [TextDraw {
     scale: 2.0,
     color: Vec4::new(1.0, 1.0, 1.0, 1.0),
 }];
-renderer.render_objects_with_text(&models, view, proj, &text)?;
+let camera = Camera {
+    view,
+    proj,
+    position: camera_position,
+};
+renderer.render_objects_with_text(&objects, camera, &text)?;
 ```
 
 `TextDraw` accepts ordinary labels too; it has no dependency on diagnostics. The renderer supports
