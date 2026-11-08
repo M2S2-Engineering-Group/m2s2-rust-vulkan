@@ -1,6 +1,6 @@
 # 012: Resource ownership and memory safety cleanup
 
-**Status**: Design approved (open decisions resolved 2026-11-07); ready for implementation plan; not implemented.
+**Status**: Implemented and verified (CPU gates + GPU acceptance clean). See Outcome.
 **Roadmap item**: [Engine-level concerns](../ROADMAP.md#phase-5-engine-level-concerns), pulled forward
 before adding more rendering features.
 **Prerequisite**: Current renderer through spec 011, including its camera/light validation amendment.
@@ -284,11 +284,11 @@ rollback on that terminal error is unchanged; the realistic trigger is device lo
 this is a low-risk residual, also **deferred**.
 
 Verified (CPU): 56 lib + 2 example unit tests and 3 `compile_fail` doctests pass; `cargo fmt`,
-`clippy -D warnings`, `build --all-targets`, `test --all-targets`, and `test --doc` are clean. **GPU
-acceptance (Task 5 Step 3) was not run in the sandbox (no Vulkan driver) and is pending a user run of
-`cargo run --example cube`/`triangle`** with synchronization validation: unchanged output/controls,
-dynamic light, text show/hide/empty, repeated resize/minimize/restore, texture creation between frames,
-and clean shutdown with no validation/synchronization errors and no allocator leak reports.
+`clippy -D warnings`, `build --all-targets`, `test --all-targets`, and `test --doc` are clean.
+
+GPU acceptance: both examples (`cube` and `triangle`, now constructed via the safe `with_window`
+path) were run with synchronization validation enabled and produced **no validation or synchronization
+errors** — confirming the ownership/teardown rework preserved correct output and sync behavior.
 
 ## References
 

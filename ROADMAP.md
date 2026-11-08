@@ -67,7 +67,7 @@ What separates "a triangle renders" from "a usable rendering engine" for simple 
 
 **Milestone**: a lit, textured 3D scene with a movable camera and more than one object.
 
-**Safety cleanup (done, pending GPU acceptance):** [spec 012](specs/012-resource-ownership-and-memory-safety.md)
+**Safety cleanup (done):** [spec 012](specs/012-resource-ownership-and-memory-safety.md)
 landed the resource-ownership/memory-safety work ahead of further rendering features — private owners +
 safe `with_window`/`unsafe new` constructors, bounded exclusive mapped writes, ownership-consuming
 destruction, and a terminal-failure leak policy. Two scoped items deferred (ManuallyDrop→Option for the
