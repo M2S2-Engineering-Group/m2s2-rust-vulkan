@@ -46,24 +46,25 @@ pub(super) fn submit_once(
         // A failed submit means nothing is in flight — the cleanup guards may free normally (`?`).
         dev.queue_submit(device.graphics_queue, &[submit], fence)
             .map_err(VulkanError::from)?;
-        let state = SubmitState::NotSubmitted.advance(SubmitStep::Submitted);
-        let state = match dev.wait_for_fences(&[fence], true, u64::MAX) {
-            Ok(()) => state.advance(SubmitStep::WaitOk),
-            Err(e) => {
-                // Wait could not confirm completion: the GPU may still own the pool/fence (and the
-                // caller's staging/destination). Leak the pool/fence rather than destroy them, and
-                // report terminal.
-                let state = state.advance(SubmitStep::WaitFailed);
-                debug_assert!(!state.may_release_pending());
-                pool_cleanup.disarm();
-                fence_cleanup.disarm();
-                return Err(VulkanError::Terminal(format!(
-                    "upload fence wait could not confirm completion: {e:?}"
-                )));
-            }
+        let pending = SubmitState::NotSubmitted.advance(SubmitStep::Submitted);
+        let wait = dev.wait_for_fences(&[fence], true, u64::MAX);
+        let step = if wait.is_ok() {
+            SubmitStep::WaitOk
+        } else {
+            SubmitStep::WaitFailed
         };
+        if !pending.advance(step).may_release_pending() {
+            // Wait could not confirm completion: the GPU may still own the pool/fence (and the
+            // caller's staging/destination). Leak the pool/fence rather than destroy them, and report
+            // terminal — never free possibly-in-use resources.
+            pool_cleanup.disarm();
+            fence_cleanup.disarm();
+            return Err(VulkanError::Terminal(format!(
+                "upload fence wait could not confirm completion: {:?}",
+                wait.err()
+            )));
+        }
         // Completion confirmed: the guards free the pool/fence as they drop at end of scope.
-        debug_assert!(state.may_release_pending());
     }
     Ok(())
 }
