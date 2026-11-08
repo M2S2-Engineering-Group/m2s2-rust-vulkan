@@ -1,6 +1,6 @@
 # 013: Blinn–Phong specular lighting
 
-**Status**: Draft for review; not implemented.
+**Status**: Design approved (open decisions resolved 2026-11-08); ready for implementation plan; not implemented.
 **Roadmap item**: [Phase 2 basic lighting](../ROADMAP.md#phase-2-standard-rendering-features).
 **Prerequisites**: Spec 011 directional lighting and the ownership/mapped-write contracts agreed in
 spec 012. This draft can be reviewed before 012 is implemented; it must not bypass its safety work.
@@ -148,15 +148,27 @@ with synchronization validation. Record the chosen pixel tolerance and tested de
 Run all repository quality gates, doctests, shader compilation/validation, and documented API examples.
 Keep GPU checks opt-in for CPU-only CI.
 
+## Resolved decisions (2026-11-08)
+
+- **Camera API:** accepted as proposed — `Camera { view, proj, position }` replaces the separate
+  `view`/`proj` render arguments on `render_frame`/`render_objects`/`render_objects_with_text`.
+- **Default material:** accepted as proposed — `SpecularMaterial::default()` is `color: (0,0,0),
+  shininess: 32`; `render_frame` and any object that doesn't opt in show zero highlight, reproducing
+  today's diffuse-only look exactly (same pattern as spec 010's `texture: None` and spec 011's default
+  sun — adding a capability must not change existing callers' output).
+- **GPU verification:** no formal pixel-tolerance/image-comparison infrastructure. The GPU acceptance
+  step is a manual visual check (same as specs 011/012): the user runs the cube example, confirms the
+  specular-off path matches the pre-013 diffuse look and the on path shows the expected highlights
+  (broader at low shininess, sharper at high), then reports pass/fail. The "Test plan" section's
+  GPU-comparison language is non-binding; implement the manual check instead.
+
 ## Open questions for review
 
-- Accept the explicit Camera signature migration, or define a named alternate API before implementation?
-- Accept zero specular color as the compatibility default, with the cube opting into visible highlights?
-- Agree on the GPU image-comparison tolerance and test fixture before accepting shader results.
+None blocking. Everything above was a design-blocking decision; all are resolved.
 
 ## Outcome
 
-Pending review and implementation. No rendering code is changed by this draft.
+(Filled in after implementation.)
 
 ## References
 
