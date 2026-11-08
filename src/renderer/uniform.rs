@@ -55,7 +55,7 @@ impl Uniforms {
 
     /// Free the mapped buffers (via `allocator`) and destroy the pool + layout (via `device`). Must
     /// run before the `Allocator` is dropped.
-    pub(crate) fn destroy(&mut self, device: &VulkanDevice, allocator: &mut Allocator) {
+    pub(crate) fn destroy(self, device: &VulkanDevice, allocator: &mut Allocator) {
         self.inner.destroy(device, allocator);
     }
 }

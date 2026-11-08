@@ -70,22 +70,24 @@ pub struct VulkanRenderer {
     // buffers are NOT ManuallyDrop: freeing a gpu-allocator allocation needs `&mut Allocator`, so
     // they're freed via explicit `destroy` in Drop, before the allocator (and the allocator before
     // the device).
-    pub(crate) vertex_buffer: buffer::Buffer,
-    pub(crate) index_buffer: buffer::Buffer,
+    // Owner resources held in `Option` so `Drop`/resize can move them into their ownership-consuming
+    // `destroy(self, ..)` (a second destroy is then impossible). Always `Some` outside teardown.
+    pub(crate) vertex_buffer: Option<buffer::Buffer>,
+    pub(crate) index_buffer: Option<buffer::Buffer>,
     // Per-frame camera uniforms + descriptor sets, and the depth attachment. Like the buffers (and for
     // the same reason — freeing their allocations needs `&mut Allocator`), these are NOT
     // `ManuallyDrop`; they're torn down via explicit `destroy` in `Drop`, before the allocator.
     // `depth` is also recreated on resize (it's swapchain-extent-sized); `uniforms` is not.
-    pub(crate) uniforms: uniform::Uniforms,
-    pub(crate) depth: depth::DepthResources,
+    pub(crate) uniforms: Option<uniform::Uniforms>,
+    pub(crate) depth: Option<depth::DepthResources>,
     pub(crate) texture_set_layout: vk::DescriptorSetLayout,
-    pub(crate) white_texture: StoredTexture,
+    pub(crate) white_texture: Option<StoredTexture>,
     pub(crate) white_set: vk::DescriptorSet,
     pub(crate) textures: Vec<StoredTexture>,
     pub(crate) texture_sets: Vec<vk::DescriptorSet>,
     // Per-frame light uniform (descriptor set 2) and the current directional light it uploads each
     // frame. Like `uniforms`, freed via explicit `destroy` in `Drop` before the allocator.
-    pub(crate) light: Light,
+    pub(crate) light: Option<Light>,
     pub(crate) directional_light: DirectionalLight,
     pub(crate) allocator: ManuallyDrop<allocator::Allocator>,
     // Retained window/display owner from the safe `with_window` constructor (None for the unsafe
@@ -244,25 +246,25 @@ impl VulkanRenderer {
         let (pipeline, frame_context) = match resources {
             Ok(resources) => resources,
             Err(error) => {
-                if let Some(mut resource) = light.take() {
+                if let Some(resource) = light.take() {
                     resource.destroy(&device, &mut allocator);
                 }
-                if let Some(mut resource) = white_texture.take() {
+                if let Some(resource) = white_texture.take() {
                     resource.destroy(&device, &mut allocator);
                 }
                 if let Some(layout) = texture_set_layout.take() {
                     unsafe { device.device.destroy_descriptor_set_layout(layout, None) };
                 }
-                if let Some(resource) = uniforms.as_mut() {
+                if let Some(resource) = uniforms.take() {
                     resource.destroy(&device, &mut allocator);
                 }
-                if let Some(resource) = depth.as_mut() {
+                if let Some(resource) = depth.take() {
                     resource.destroy(&device, &mut allocator);
                 }
-                if let Some(resource) = index_buffer.as_mut() {
+                if let Some(resource) = index_buffer.take() {
                     resource.destroy(&device, &mut allocator);
                 }
-                if let Some(resource) = vertex_buffer.as_mut() {
+                if let Some(resource) = vertex_buffer.take() {
                     resource.destroy(&device, &mut allocator);
                 }
                 return Err(error);
@@ -292,16 +294,16 @@ impl VulkanRenderer {
             swapchain: ManuallyDrop::new(swapchain),
             pipeline: ManuallyDrop::new(pipeline),
             frame_context: ManuallyDrop::new(frame_context),
-            vertex_buffer,
-            index_buffer,
-            uniforms,
-            depth,
+            vertex_buffer: Some(vertex_buffer),
+            index_buffer: Some(index_buffer),
+            uniforms: Some(uniforms),
+            depth: Some(depth),
             texture_set_layout,
-            white_texture,
+            white_texture: Some(white_texture),
             white_set,
             textures: Vec::new(),
             texture_sets: Vec::new(),
-            light,
+            light: Some(light),
             directional_light: DirectionalLight::default(),
             allocator: ManuallyDrop::new(allocator),
             _window: window,
@@ -379,30 +381,35 @@ impl VulkanRenderer {
                 &mut self.allocator,
                 self.swapchain.extent,
             )?;
-            self.depth.destroy(&self.device, &mut self.allocator);
-            self.depth = replacement;
+            if let Some(old) = self.depth.take() {
+                old.destroy(&self.device, &mut self.allocator);
+            }
+            self.depth = Some(replacement);
             // Dynamic viewport/scissor handles extent changes, but formats are pipeline state.
             if let Some(renderer) = self.text_renderer.as_mut() {
                 renderer.ensure_formats(
                     &self.device,
                     self.swapchain.format,
-                    self.depth.format(),
+                    self.depth.as_ref().unwrap().format(),
                 )?;
             }
-            if self.pipeline_formats != (self.swapchain.format, self.depth.format()) {
+            if self.pipeline_formats
+                != (self.swapchain.format, self.depth.as_ref().unwrap().format())
+            {
                 let pipeline = pipeline::GraphicsPipeline::new(
                     &self.device,
                     self.swapchain.format,
-                    self.depth.format(),
+                    self.depth.as_ref().unwrap().format(),
                     &[
-                        self.uniforms.descriptor_set_layout(),
+                        self.uniforms.as_ref().unwrap().descriptor_set_layout(),
                         self.texture_set_layout,
-                        self.light.descriptor_set_layout(),
+                        self.light.as_ref().unwrap().descriptor_set_layout(),
                     ],
                 )?;
                 let old = std::mem::replace(&mut self.pipeline, ManuallyDrop::new(pipeline));
                 drop(ManuallyDrop::into_inner(old));
-                self.pipeline_formats = (self.swapchain.format, self.depth.format());
+                self.pipeline_formats =
+                    (self.swapchain.format, self.depth.as_ref().unwrap().format());
             }
             self.pending_resize = None;
         }
@@ -413,7 +420,7 @@ impl VulkanRenderer {
                 &self.device,
                 &mut self.allocator,
                 self.swapchain.format,
-                self.depth.format(),
+                self.depth.as_ref().unwrap().format(),
             )?);
         }
         let camera = uniform::CameraUniforms { view, proj };
@@ -421,12 +428,12 @@ impl VulkanRenderer {
             &self.device,
             &self.pipeline,
             &self.swapchain,
-            &self.depth,
-            &mut self.uniforms,
-            &self.vertex_buffer,
-            &self.index_buffer,
+            self.depth.as_ref().unwrap(),
+            self.uniforms.as_mut().unwrap(),
+            self.vertex_buffer.as_ref().unwrap(),
+            self.index_buffer.as_ref().unwrap(),
             &camera,
-            &mut self.light,
+            self.light.as_mut().unwrap(),
             &self.directional_light,
             objects,
             &self.texture_sets,
@@ -436,7 +443,8 @@ impl VulkanRenderer {
         )?;
         if outcome.submitted() {
             self.scene_draw_calls = objects.len();
-            self.submitted_indices = objects.len() as u64 * u64::from(self.index_buffer.len());
+            self.submitted_indices =
+                objects.len() as u64 * u64::from(self.index_buffer.as_ref().unwrap().len());
         }
         match outcome {
             command::FrameOutcome::Rendered => {}
@@ -513,7 +521,7 @@ impl Drop for VulkanRenderer {
         // device/instance they were built from.
         unsafe {
             ManuallyDrop::drop(&mut self.frame_context);
-            if let Some(mut text) = self.text_renderer.take() {
+            if let Some(text) = self.text_renderer.take() {
                 text.destroy(&self.device, &mut self.allocator);
             }
             // Pipeline before uniforms: its pipeline layout references the descriptor-set layout
@@ -521,18 +529,29 @@ impl Drop for VulkanRenderer {
             ManuallyDrop::drop(&mut self.pipeline);
             // Free everything allocator-backed (uniforms' buffers, depth image, vertex/index
             // buffers) before dropping the allocator -- every allocation must outlive neither the
-            // allocator nor the device it was built from.
-            self.uniforms.destroy(&self.device, &mut self.allocator);
-            self.light.destroy(&self.device, &mut self.allocator);
-            self.depth.destroy(&self.device, &mut self.allocator);
-            self.vertex_buffer
-                .destroy(&self.device, &mut self.allocator);
-            self.index_buffer.destroy(&self.device, &mut self.allocator);
-            for texture in &mut self.textures {
+            // allocator nor the device it was built from. Each owner is moved out of its `Option`
+            // and consumed exactly once.
+            if let Some(uniforms) = self.uniforms.take() {
+                uniforms.destroy(&self.device, &mut self.allocator);
+            }
+            if let Some(light) = self.light.take() {
+                light.destroy(&self.device, &mut self.allocator);
+            }
+            if let Some(depth) = self.depth.take() {
+                depth.destroy(&self.device, &mut self.allocator);
+            }
+            if let Some(vertex_buffer) = self.vertex_buffer.take() {
+                vertex_buffer.destroy(&self.device, &mut self.allocator);
+            }
+            if let Some(index_buffer) = self.index_buffer.take() {
+                index_buffer.destroy(&self.device, &mut self.allocator);
+            }
+            for texture in std::mem::take(&mut self.textures) {
                 texture.destroy(&self.device, &mut self.allocator);
             }
-            self.white_texture
-                .destroy(&self.device, &mut self.allocator);
+            if let Some(white_texture) = self.white_texture.take() {
+                white_texture.destroy(&self.device, &mut self.allocator);
+            }
             self.device
                 .device
                 .destroy_descriptor_set_layout(self.texture_set_layout, None);

@@ -328,19 +328,19 @@ impl TextRenderer {
         dev.cmd_draw(cmd, vertex_count, 1, 0, 0);
     }
 
-    pub fn destroy(&mut self, device: &VulkanDevice, allocator: &mut Allocator) {
-        self.pipeline.take();
-        for buffer in &mut self.buffers {
+    pub fn destroy(self, device: &VulkanDevice, allocator: &mut Allocator) {
+        // Drop the pipeline first (its layout must go before the pool/layout below).
+        drop(self.pipeline);
+        for buffer in self.buffers {
             buffer.destroy(device, allocator);
         }
-        self.buffers.clear();
         unsafe {
             device.device.destroy_descriptor_pool(self.pool, None);
             device
                 .device
                 .destroy_descriptor_set_layout(self.layout, None);
         }
-        if let Some(mut image) = self.image.take() {
+        if let Some(image) = self.image {
             image.destroy(device, allocator);
         }
     }

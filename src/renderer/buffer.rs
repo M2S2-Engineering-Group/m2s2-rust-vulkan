@@ -197,9 +197,9 @@ impl Buffer {
 
     /// Destroy the buffer and return its allocation to the allocator. Must run before the
     /// `Allocator` is dropped.
-    pub(crate) fn destroy(&mut self, device: &VulkanDevice, allocator: &mut Allocator) {
+    pub(crate) fn destroy(self, device: &VulkanDevice, allocator: &mut Allocator) {
         unsafe { device.device.destroy_buffer(self.buffer, None) };
-        if let Some(allocation) = self.allocation.take() {
+        if let Some(allocation) = self.allocation {
             let _ = allocator.free(allocation);
         }
     }

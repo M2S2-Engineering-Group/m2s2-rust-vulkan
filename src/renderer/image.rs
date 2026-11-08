@@ -193,13 +193,13 @@ impl SampledImage {
         Ok(resource)
     }
 
-    pub fn destroy(&mut self, device: &VulkanDevice, allocator: &mut Allocator) {
+    pub fn destroy(self, device: &VulkanDevice, allocator: &mut Allocator) {
         unsafe {
             device.device.destroy_sampler(self.sampler, None);
             device.device.destroy_image_view(self.view, None);
             device.device.destroy_image(self.image, None);
         }
-        if let Some(allocation) = self.allocation.take() {
+        if let Some(allocation) = self.allocation {
             let _ = allocator.free(allocation);
         }
     }

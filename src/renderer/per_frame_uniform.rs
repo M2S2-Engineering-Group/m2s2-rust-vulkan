@@ -73,14 +73,14 @@ impl PerFrameUniform {
             match buffer {
                 Ok(buffer) => buffers_vec.push(buffer),
                 Err(error) => {
-                    for buffer in &mut buffers_vec {
+                    for buffer in buffers_vec {
                         buffer.destroy(device, allocator);
                     }
                     return Err(error);
                 }
             }
         }
-        let mut buffers: [Buffer; FRAMES_IN_FLIGHT] = buffers_vec
+        let buffers: [Buffer; FRAMES_IN_FLIGHT] = buffers_vec
             .try_into()
             .unwrap_or_else(|_| unreachable!("pushed exactly FRAMES_IN_FLIGHT buffers"));
 
@@ -92,7 +92,7 @@ impl PerFrameUniform {
         let sets = match unsafe { dev.allocate_descriptor_sets(&alloc_info) } {
             Ok(sets) => sets,
             Err(error) => {
-                for buffer in &mut buffers {
+                for buffer in buffers {
                     buffer.destroy(device, allocator);
                 }
                 return Err(error.into());
@@ -142,8 +142,8 @@ impl PerFrameUniform {
 
     /// Free the mapped buffers (via `allocator`) and destroy the pool + layout (via `device`). The
     /// pool destroy implicitly frees the descriptor sets. Must run before the `Allocator` is dropped.
-    pub(crate) fn destroy(&mut self, device: &VulkanDevice, allocator: &mut Allocator) {
-        for buffer in &mut self.buffers {
+    pub(crate) fn destroy(self, device: &VulkanDevice, allocator: &mut Allocator) {
+        for buffer in self.buffers {
             buffer.destroy(device, allocator);
         }
         unsafe {

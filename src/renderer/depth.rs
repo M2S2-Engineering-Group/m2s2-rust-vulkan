@@ -147,12 +147,12 @@ impl DepthResources {
 
     /// Destroy the view + image (via `device`) and free the allocation (via `allocator`). Must run
     /// before the `Allocator` is dropped.
-    pub(crate) fn destroy(&mut self, device: &VulkanDevice, allocator: &mut Allocator) {
+    pub(crate) fn destroy(self, device: &VulkanDevice, allocator: &mut Allocator) {
         unsafe {
             device.device.destroy_image_view(self.view, None);
             device.device.destroy_image(self.image, None);
         }
-        if let Some(allocation) = self.allocation.take() {
+        if let Some(allocation) = self.allocation {
             let _ = allocator.free(allocation);
         }
     }

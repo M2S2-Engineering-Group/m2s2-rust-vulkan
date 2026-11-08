@@ -128,7 +128,7 @@ impl Light {
         self.inner.descriptor_set(frame)
     }
 
-    pub(crate) fn destroy(&mut self, device: &VulkanDevice, allocator: &mut Allocator) {
+    pub(crate) fn destroy(self, device: &VulkanDevice, allocator: &mut Allocator) {
         self.inner.destroy(device, allocator);
     }
 }

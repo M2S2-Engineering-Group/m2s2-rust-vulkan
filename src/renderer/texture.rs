@@ -51,7 +51,7 @@ impl StoredTexture {
         height: u32,
     ) -> Result<Self> {
         // SampledImage::new_rgba8_srgb validates and rolls back its own partial resources on error.
-        let mut image =
+        let image =
             SampledImage::new_rgba8_srgb(device, allocator, vk::Extent2D { width, height }, rgba8)?;
         let dev = &device.device;
         // Pool is created outside the allocate/write closure below so its handle is available to
@@ -110,7 +110,7 @@ impl StoredTexture {
         }
     }
 
-    pub(super) fn destroy(&mut self, device: &VulkanDevice, allocator: &mut Allocator) {
+    pub(super) fn destroy(self, device: &VulkanDevice, allocator: &mut Allocator) {
         unsafe { device.device.destroy_descriptor_pool(self.pool, None) };
         self.image.destroy(device, allocator);
     }
