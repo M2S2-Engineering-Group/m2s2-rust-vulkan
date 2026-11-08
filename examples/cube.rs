@@ -5,11 +5,11 @@ use m2s2_rust_vulkan::{
     init_logging, Diagnostics, DirectionalLight, Index, Object, TextDraw, Vertex, VulkanRenderer,
 };
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::event::{ElementState, Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::WindowBuilder;
 
 // Leaves clearance between the unit cubes throughout their rotations.
@@ -76,10 +76,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("Creating window...");
     let event_loop = EventLoop::new()?;
-    let window = WindowBuilder::new()
-        .with_title("M2S2 Vulkan Cubes")
-        .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
-        .build(&event_loop)?;
+    let window = Arc::new(
+        WindowBuilder::new()
+            .with_title("M2S2 Vulkan Cubes")
+            .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
+            .build(&event_loop)?,
+    );
 
     log::info!("Initializing Vulkan renderer...");
     let size = window.inner_size();
@@ -158,9 +160,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let mut renderer = VulkanRenderer::new(
-        window.display_handle()?.as_raw(),
-        window.window_handle()?.as_raw(),
+    let mut renderer = VulkanRenderer::with_window(
+        Arc::clone(&window),
         (size.width, size.height),
         &vertices,
         &indices,

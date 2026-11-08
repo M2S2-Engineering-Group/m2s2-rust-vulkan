@@ -1,6 +1,6 @@
 pub mod error;
 pub mod math;
-pub mod renderer;
+mod renderer;
 
 pub use error::{Result, VulkanError};
 pub use renderer::buffer::{Index, Vertex};
@@ -9,6 +9,9 @@ pub use renderer::light::DirectionalLight;
 pub use renderer::text::TextDraw;
 pub use renderer::texture::{Object, TextureId};
 pub use renderer::VulkanRenderer;
+// Re-exported so consumers can name the handle types `VulkanRenderer::new` takes without
+// depending on `raw-window-handle` directly.
+pub use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 /// Initialize logging for the library
 pub fn init_logging() {

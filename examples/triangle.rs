@@ -4,9 +4,9 @@
 
 use m2s2_rust_vulkan::math::{look_at, perspective, to_radians, Mat4, Vec2, Vec3};
 use m2s2_rust_vulkan::{init_logging, Index, Vertex, VulkanRenderer};
+use std::sync::Arc;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::WindowBuilder;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,10 +14,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("Creating window...");
     let event_loop = EventLoop::new()?;
-    let window = WindowBuilder::new()
-        .with_title("M2S2 Vulkan Triangle")
-        .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
-        .build(&event_loop)?;
+    let window = Arc::new(
+        WindowBuilder::new()
+            .with_title("M2S2 Vulkan Triangle")
+            .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
+            .build(&event_loop)?,
+    );
 
     log::info!("Initializing Vulkan renderer...");
     let size = window.inner_size();
@@ -47,9 +49,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let indices: [Index; 3] = [0, 1, 2];
 
-    let mut renderer = VulkanRenderer::new(
-        window.display_handle()?.as_raw(),
-        window.window_handle()?.as_raw(),
+    let mut renderer = VulkanRenderer::with_window(
+        Arc::clone(&window),
         (size.width, size.height),
         &vertices,
         &indices,

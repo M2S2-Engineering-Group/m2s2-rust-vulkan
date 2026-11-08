@@ -20,29 +20,58 @@ use crate::error::{Result, VulkanError};
 use crate::math::Mat4;
 use ash::vk;
 use light::{DirectionalLight, Light};
-use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
+use std::sync::Arc;
+
+/// A retained window/display owner the renderer keeps alive for its whole lifetime, so the safe
+/// `with_window` constructor upholds the surface's window-lifetime contract by construction. Blanket-
+/// implemented for anything exposing both handle traits (e.g. a winit `Window`).
+pub(crate) trait WindowOwner: HasWindowHandle + HasDisplayHandle {}
+impl<T: HasWindowHandle + HasDisplayHandle> WindowOwner for T {}
 use std::mem::ManuallyDrop;
 use texture::{Object, StoredTexture};
 
+/// The Vulkan renderer. Owns the whole GPU resource graph; its fields and low-level owners are
+/// private. Construct it with [`VulkanRenderer::with_window`] (safe) or [`VulkanRenderer::new`]
+/// (unsafe, raw handles).
+///
+/// External code cannot construct the low-level Vulkan owners:
+/// ```compile_fail
+/// let _ = m2s2_rust_vulkan::renderer::instance::VulkanInstance::new();
+/// ```
+///
+/// External code cannot read the renderer's private fields:
+/// ```compile_fail
+/// fn peek(r: &m2s2_rust_vulkan::VulkanRenderer) {
+///     let _ = &r.device;
+/// }
+/// ```
+///
+/// The raw-handle constructor is `unsafe` and cannot be called without an `unsafe` block:
+/// ```compile_fail
+/// fn make(d: m2s2_rust_vulkan::RawDisplayHandle, w: m2s2_rust_vulkan::RawWindowHandle) {
+///     let _ = m2s2_rust_vulkan::VulkanRenderer::new(d, w, (1, 1), &[], &[]);
+/// }
+/// ```
 pub struct VulkanRenderer {
     // `ManuallyDrop` and torn down explicitly in `Drop`, in swapchain -> device -> instance
     // order, instead of relying on Rust's default field-drop order. That default drops struct
     // fields top-to-bottom (declaration order) -- the opposite of what's needed here, since
     // Vulkan requires every object be destroyed before the VkDevice/VkInstance it was created
     // from. See the `Drop` impl below.
-    pub instance: ManuallyDrop<instance::VulkanInstance>,
-    pub device: ManuallyDrop<device::VulkanDevice>,
-    pub swapchain: ManuallyDrop<swapchain::VulkanSwapchain>,
+    pub(crate) instance: ManuallyDrop<instance::VulkanInstance>,
+    pub(crate) device: ManuallyDrop<device::VulkanDevice>,
+    pub(crate) swapchain: ManuallyDrop<swapchain::VulkanSwapchain>,
     // Constructed after swapchain; torn down before it in Drop (reverse construction order), so
     // the full destroy chain is frame_context -> pipeline -> swapchain -> device -> instance.
-    pub pipeline: ManuallyDrop<pipeline::GraphicsPipeline>,
-    pub frame_context: ManuallyDrop<command::FrameContext>,
+    pub(crate) pipeline: ManuallyDrop<pipeline::GraphicsPipeline>,
+    pub(crate) frame_context: ManuallyDrop<command::FrameContext>,
     // Caller-supplied geometry uploaded into GPU buffers, plus the allocator backing them. The
     // buffers are NOT ManuallyDrop: freeing a gpu-allocator allocation needs `&mut Allocator`, so
     // they're freed via explicit `destroy` in Drop, before the allocator (and the allocator before
     // the device).
-    pub vertex_buffer: buffer::Buffer,
-    pub index_buffer: buffer::Buffer,
+    pub(crate) vertex_buffer: buffer::Buffer,
+    pub(crate) index_buffer: buffer::Buffer,
     // Per-frame camera uniforms + descriptor sets, and the depth attachment. Like the buffers (and for
     // the same reason — freeing their allocations needs `&mut Allocator`), these are NOT
     // `ManuallyDrop`; they're torn down via explicit `destroy` in `Drop`, before the allocator.
@@ -58,7 +87,11 @@ pub struct VulkanRenderer {
     // frame. Like `uniforms`, freed via explicit `destroy` in `Drop` before the allocator.
     pub(crate) light: Light,
     pub(crate) directional_light: DirectionalLight,
-    pub allocator: ManuallyDrop<allocator::Allocator>,
+    pub(crate) allocator: ManuallyDrop<allocator::Allocator>,
+    // Retained window/display owner from the safe `with_window` constructor (None for the unsafe
+    // raw-handle `new`). Kept alive for the renderer's whole lifetime so the surface's window stays
+    // valid through teardown; dropped after the manual teardown in `Drop` has destroyed the surface.
+    _window: Option<Arc<dyn WindowOwner>>,
     // A pending resize target in physical pixels; the next `render_frame` recreates the swapchain to
     // it. Set by `resize` and by an out-of-date frame. `None` = nothing pending.
     pending_resize: Option<(u32, u32)>,
@@ -71,15 +104,70 @@ pub struct VulkanRenderer {
 }
 
 impl VulkanRenderer {
-    /// `window_extent` is the surface size in physical pixels, e.g. a winit window's `inner_size()`.
-    /// `vertices`/`indices` are the caller-supplied geometry to draw — the library defines no
-    /// meshes of its own. They're uploaded into GPU buffers this renderer owns.
-    pub fn new(
+    /// Safe constructor: the renderer retains shared ownership of `window`, so the surface's
+    /// window/display connection stays valid for the renderer's whole lifetime — including teardown —
+    /// with no caller `unsafe`. `window` provides both handles (e.g. an `Arc<winit::window::Window>`);
+    /// keep your own clone for the event loop. `window_extent` is the surface size in physical pixels.
+    pub fn with_window<W: HasWindowHandle + HasDisplayHandle + 'static>(
+        window: Arc<W>,
+        window_extent: (u32, u32),
+        vertices: &[buffer::Vertex],
+        indices: &[buffer::Index],
+    ) -> Result<Self> {
+        let display_handle = window
+            .display_handle()
+            .map_err(|e| VulkanError::ValidationError(format!("display handle unavailable: {e}")))?
+            .as_raw();
+        let window_handle = window
+            .window_handle()
+            .map_err(|e| VulkanError::ValidationError(format!("window handle unavailable: {e}")))?
+            .as_raw();
+        Self::init(
+            display_handle,
+            window_handle,
+            window_extent,
+            vertices,
+            indices,
+            Some(window as Arc<dyn WindowOwner>),
+        )
+    }
+
+    /// Unsafe constructor from raw handles, for consumers that own their own window/event loop and do
+    /// not want the renderer to retain a window reference.
+    ///
+    /// # Safety
+    /// `display_handle`/`window_handle` must describe a valid, matching window/display connection, and
+    /// their owners must stay alive until the renderer has completed GPU use and destroyed its surface
+    /// (including the terminal-leak path). The caller must satisfy platform thread-affinity rules.
+    /// Prefer [`VulkanRenderer::with_window`], which upholds this by construction.
+    ///
+    /// `window_extent` is the surface size in physical pixels; `vertices`/`indices` are the
+    /// caller-supplied geometry, uploaded into GPU buffers this renderer owns.
+    pub unsafe fn new(
         display_handle: RawDisplayHandle,
         window_handle: RawWindowHandle,
         window_extent: (u32, u32),
         vertices: &[buffer::Vertex],
         indices: &[buffer::Index],
+    ) -> Result<Self> {
+        Self::init(
+            display_handle,
+            window_handle,
+            window_extent,
+            vertices,
+            indices,
+            None,
+        )
+    }
+
+    /// Shared construction. `window` is the retained owner for the safe path (`None` for raw handles).
+    fn init(
+        display_handle: RawDisplayHandle,
+        window_handle: RawWindowHandle,
+        window_extent: (u32, u32),
+        vertices: &[buffer::Vertex],
+        indices: &[buffer::Index],
+        window: Option<Arc<dyn WindowOwner>>,
     ) -> Result<Self> {
         log::info!("Initializing Vulkan renderer");
 
@@ -216,6 +304,7 @@ impl VulkanRenderer {
             light,
             directional_light: DirectionalLight::default(),
             allocator: ManuallyDrop::new(allocator),
+            _window: window,
             pending_resize: None,
             text_renderer: None,
             pipeline_formats,
