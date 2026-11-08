@@ -70,6 +70,25 @@ pub struct Buffer {
     pub(crate) buffer: vk::Buffer,
     allocation: Option<Allocation>,
     len: u32,
+    /// Logical byte capacity the caller may write via `write_mapped` — the requested size, distinct
+    /// from element count (`len`) and from any allocator padding behind the mapping.
+    logical_capacity: usize,
+}
+
+/// Validate a `write_mapped` before touching memory: the buffer must be mapped and the write must fit
+/// the logical capacity (allocator padding does not count). Pure so it is unit-testable without a GPU.
+fn check_mapped_write(logical_capacity: usize, mapped: bool, len: usize) -> Result<()> {
+    if !mapped {
+        return Err(VulkanError::ValidationError(
+            "write_mapped on an unmapped buffer".into(),
+        ));
+    }
+    if len > logical_capacity {
+        return Err(VulkanError::ValidationError(
+            "write_mapped exceeds the buffer's logical capacity".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl Buffer {
@@ -116,6 +135,7 @@ impl Buffer {
                 buffer,
                 allocation: Some(allocation),
                 len: data.len() as u32,
+                logical_capacity: bytes.len(),
             })
         })();
         unsafe { device.device.destroy_buffer(staging, None) };
@@ -145,22 +165,29 @@ impl Buffer {
             buffer,
             allocation: Some(allocation),
             len: 0,
+            logical_capacity: size as usize,
         })
     }
 
     /// Copy `bytes` into this buffer's persistent mapping. Only valid on a buffer from
-    /// `new_host_visible_mapped`. Takes `&self`: it writes through the allocation's mapped pointer
-    /// (no `&mut` needed), so a per-frame uniform update doesn't require mutable access. The caller
-    /// must ensure the GPU isn't still reading this buffer (the per-frame-in-flight fence handles
-    /// that in the render loop).
-    pub(crate) fn write_mapped(&self, bytes: &[u8]) {
-        let ptr = self
+    /// `new_host_visible_mapped`. Takes `&mut self` so overlapping host writes through this API can't
+    /// race, and rejects (before touching memory) an unmapped buffer or a write beyond the buffer's
+    /// logical capacity. The caller must still ensure the GPU isn't reading this buffer — the
+    /// per-frame-in-flight fence handles that in the render loop.
+    pub(crate) fn write_mapped(&mut self, bytes: &[u8]) -> Result<()> {
+        let mapped = self
             .allocation
             .as_ref()
             .and_then(|a| a.mapped_ptr())
-            .expect("host-visible mapped buffer has a mapping")
-            .as_ptr() as *mut u8;
-        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()) };
+            .is_some();
+        check_mapped_write(self.logical_capacity, mapped, bytes.len())?;
+        let slice = self
+            .allocation
+            .as_mut()
+            .and_then(|a| a.mapped_slice_mut())
+            .expect("mapping checked above");
+        slice[..bytes.len()].copy_from_slice(bytes);
+        Ok(())
     }
 
     /// Element count (vertices or indices), for `cmd_draw` / `cmd_draw_indexed`.
@@ -236,6 +263,15 @@ fn copy_buffer(device: &VulkanDevice, src: vk::Buffer, dst: vk::Buffer, size: u6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mapped_write_bounds_and_mapping() {
+        assert!(check_mapped_write(16, true, 0).is_ok()); // empty
+        assert!(check_mapped_write(16, true, 16).is_ok()); // exact
+        assert!(check_mapped_write(16, true, 8).is_ok()); // smaller
+        assert!(check_mapped_write(16, true, 17).is_err()); // oversized
+        assert!(check_mapped_write(16, false, 4).is_err()); // unmapped
+    }
 
     #[test]
     fn vertex_is_tightly_packed() {

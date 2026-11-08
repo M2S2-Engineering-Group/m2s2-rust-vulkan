@@ -299,8 +299,8 @@ impl TextRenderer {
     }
 
     /// Frame's fence must have signaled before writing this slot.
-    pub fn update(&self, frame: usize, vertices: &[TextVertex]) {
-        self.buffers[frame].write_mapped(bytemuck::cast_slice(vertices));
+    pub fn update(&mut self, frame: usize, vertices: &[TextVertex]) -> Result<()> {
+        self.buffers[frame].write_mapped(bytemuck::cast_slice(vertices))
     }
 
     /// Record after the scene in the same rendering scope; viewport/scissor are already set.

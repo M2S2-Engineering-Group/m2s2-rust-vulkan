@@ -115,9 +115,9 @@ impl Light {
 
     /// Write `light` into frame `frame`'s mapped buffer (converted to std140). The caller must have
     /// waited on that frame's in-flight fence first, so the GPU isn't mid-read.
-    pub(crate) fn update(&self, frame: usize, light: &DirectionalLight) {
+    pub(crate) fn update(&mut self, frame: usize, light: &DirectionalLight) -> Result<()> {
         self.inner
-            .update(frame, bytemuck::bytes_of(&LightUniforms::from(light)));
+            .update(frame, bytemuck::bytes_of(&LightUniforms::from(light)))
     }
 
     pub(crate) fn descriptor_set_layout(&self) -> vk::DescriptorSetLayout {

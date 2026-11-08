@@ -41,8 +41,8 @@ impl Uniforms {
 
     /// Write `ubo` into frame `frame`'s mapped uniform buffer. The caller must have waited on that
     /// frame's in-flight fence first (the render loop does), so the GPU isn't mid-read.
-    pub(crate) fn update(&self, frame: usize, ubo: &CameraUniforms) {
-        self.inner.update(frame, bytemuck::bytes_of(ubo));
+    pub(crate) fn update(&mut self, frame: usize, ubo: &CameraUniforms) -> Result<()> {
+        self.inner.update(frame, bytemuck::bytes_of(ubo))
     }
 
     pub(crate) fn descriptor_set_layout(&self) -> vk::DescriptorSetLayout {

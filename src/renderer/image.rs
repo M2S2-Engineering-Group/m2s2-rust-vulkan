@@ -65,7 +65,7 @@ impl SampledImage {
             pixels.len() as u64,
             vk::BufferUsageFlags::TRANSFER_SRC,
         )?;
-        staging.write_mapped(pixels);
+        staging.write_mapped(pixels)?;
         let mut resource = Self {
             image: vk::Image::null(),
             view: vk::ImageView::null(),

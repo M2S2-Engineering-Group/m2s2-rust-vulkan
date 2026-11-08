@@ -135,16 +135,16 @@ impl FrameContext {
         pipeline: &GraphicsPipeline,
         swapchain: &VulkanSwapchain,
         depth: &DepthResources,
-        uniforms: &Uniforms,
+        uniforms: &mut Uniforms,
         vertex_buffer: &Buffer,
         index_buffer: &Buffer,
         camera: &CameraUniforms,
-        light: &Light,
+        light: &mut Light,
         directional_light: &DirectionalLight,
         objects: &[Object],
         texture_sets: &[vk::DescriptorSet],
         white_set: vk::DescriptorSet,
-        text: Option<&TextRenderer>,
+        mut text: Option<&mut TextRenderer>,
         text_vertices: &[TextVertex],
     ) -> Result<FrameOutcome> {
         let dev = &device.device;
@@ -193,10 +193,10 @@ impl FrameContext {
         // 3b. Write this frame's camera into its uniform buffer. Safe without extra sync: the buffer is
         //     per-frame-in-flight and step 1's fence wait guarantees the GPU finished the previous
         //     use of this slot.
-        uniforms.update(frame, camera);
-        light.update(frame, directional_light);
-        if let Some(text) = text {
-            text.update(frame, text_vertices);
+        uniforms.update(frame, camera)?;
+        light.update(frame, directional_light)?;
+        if let Some(text) = text.as_deref_mut() {
+            text.update(frame, text_vertices)?;
         }
 
         // 4. Record the command buffer.
@@ -214,7 +214,7 @@ impl FrameContext {
             objects,
             texture_sets,
             white_set,
-            text,
+            text.as_deref(),
             frame,
             text_vertices.len() as u32,
         )?;

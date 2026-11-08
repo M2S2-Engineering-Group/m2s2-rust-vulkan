@@ -128,8 +128,8 @@ impl PerFrameUniform {
 
     /// Write `bytes` into frame `frame`'s mapped buffer. The caller must have waited on that frame's
     /// in-flight fence first (the render loop does), so the GPU isn't mid-read.
-    pub(crate) fn update(&self, frame: usize, bytes: &[u8]) {
-        self.buffers[frame].write_mapped(bytes);
+    pub(crate) fn update(&mut self, frame: usize, bytes: &[u8]) -> Result<()> {
+        self.buffers[frame].write_mapped(bytes)
     }
 
     pub(crate) fn descriptor_set_layout(&self) -> vk::DescriptorSetLayout {
