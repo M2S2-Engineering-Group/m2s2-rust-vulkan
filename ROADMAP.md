@@ -67,9 +67,11 @@ What separates "a triangle renders" from "a usable rendering engine" for simple 
 
 **Milestone**: a lit, textured 3D scene with a movable camera and more than one object.
 
-**Before the next feature**: review [draft spec 012](specs/012-resource-ownership-and-memory-safety.md)
-for ownership, mapped-memory writes, destruction, and submission-failure cleanup. This is a safety
-cleanup proposed ahead of additional rendering features; implementation has not started.
+**Safety cleanup (done, pending GPU acceptance):** [spec 012](specs/012-resource-ownership-and-memory-safety.md)
+landed the resource-ownership/memory-safety work ahead of further rendering features — private owners +
+safe `with_window`/`unsafe new` constructors, bounded exclusive mapped writes, ownership-consuming
+destruction, and a terminal-failure leak policy. Two scoped items deferred (ManuallyDrop→Option for the
+six core owners; upload staging leak-on-terminal) — see the spec Outcome.
 
 Proposed follow-ups after cleanup: [draft spec 013](specs/013-specular-lighting.md) adds per-object
 Blinn–Phong highlights and explicit frame camera data; [draft spec 014](specs/014-texture-mipmaps.md)

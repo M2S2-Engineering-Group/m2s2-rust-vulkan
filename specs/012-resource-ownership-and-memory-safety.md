@@ -251,8 +251,44 @@ cleanup on unconfirmed completion. Verify output/controls remain unchanged.
 
 ## Outcome
 
-Pending review and implementation. Existing camera/light edits and untracked plan/screenshot artifacts
-are outside this draft and are not changed by it.
+Implemented across four tasks on `feat/012-resource-ownership` (plan
+`docs/superpowers/plans/2026-11-07-resource-ownership-safety.md`):
+
+1. **Encapsulation + constructors.** `mod renderer` is now private; only the public data types and
+   `VulkanRenderer` are re-exported from the crate root (plus `RawDisplayHandle`/`RawWindowHandle` so
+   the unsafe constructor's signature is nameable). All `VulkanRenderer` fields are private. Added the
+   safe `with_window<W: HasWindowHandle + HasDisplayHandle + 'static>(Arc<W>, …)` (retains the window
+   via `Arc<dyn WindowOwner>`) and `unsafe fn new(raw handles, …)`, sharing a private `init`. Three
+   `compile_fail` doctests prove external code cannot construct the low-level owners, read a private
+   field, or call `new` without `unsafe`. Examples use `with_window`.
+2. **Bounded exclusive mapped writes.** `Buffer::write_mapped(&mut self, &[u8]) -> Result<()>` with a
+   pure, unit-tested `check_mapped_write` (empty/exact/smaller/oversized/unmapped); a `logical_capacity`
+   field distinct from element count/padding; `&mut` + `?` threaded through the camera/light/text
+   update chain.
+3. **Ownership-consuming destruction + `Option` teardown.** Every allocator-backed owner's
+   `destroy(self, ..)` consumes `self` (a second destroy cannot compile); the six allocator-backed
+   renderer fields became `Option<T>` moved out via `take()` in `Drop`/resize, and `textures` via
+   `mem::take`.
+4. **Submission-aware ownership + terminal state.** A pure `SubmitState`
+   (NotSubmitted→Pending→Completed/Terminal) decides when pending resources may be released; `upload`
+   leaks its transient pool/fence on a wait failure; the frame path maps the step-1 wait and all
+   post-reset failures to `VulkanError::Terminal`; the renderer then rejects all public calls and, in
+   `Drop`, deliberately leaks the whole resource graph (no free, no abort).
+
+Resolved decisions are recorded above. **Scoped deviations (ledgered):** the six core owners
+(`instance`/`device`/`swapchain`/`pipeline`/`frame_context`/`allocator`) remain `ManuallyDrop` rather
+than `Option` — converting them is pure `unsafe`-reduction (they drop via their own `Drop`, with no
+double-free benefit) at ~46 access sites and is not reachable by safe consumers, so it is **deferred**.
+`upload::submit_once` leaks its own pool/fence on a wait failure, but the caller's staging/destination
+rollback on that terminal error is unchanged; the realistic trigger is device loss (infinite wait), so
+this is a low-risk residual, also **deferred**.
+
+Verified (CPU): 56 lib + 2 example unit tests and 3 `compile_fail` doctests pass; `cargo fmt`,
+`clippy -D warnings`, `build --all-targets`, `test --all-targets`, and `test --doc` are clean. **GPU
+acceptance (Task 5 Step 3) was not run in the sandbox (no Vulkan driver) and is pending a user run of
+`cargo run --example cube`/`triangle`** with synchronization validation: unchanged output/controls,
+dynamic light, text show/hide/empty, repeated resize/minimize/restore, texture creation between frames,
+and clean shutdown with no validation/synchronization errors and no allocator leak reports.
 
 ## References
 

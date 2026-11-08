@@ -127,12 +127,21 @@ are nicer, but not enough to justify redoing `instance.rs`/`device.rs`/`swapchai
 - **`depth.rs`, `uniform.rs`, `allocator.rs`** — shared synchronized depth attachment, per-frame mapped
   uniforms/descriptors, and GPU suballocation. Private `cleanup.rs` provides constructor rollback helpers.
 
-**Window handles, not window ownership**: `VulkanRenderer::new`, `VulkanDevice::new`, and
-`VulkanSwapchain::new` take `RawDisplayHandle` + `RawWindowHandle` (from `raw-window-handle`, a direct
-dependency) plus an explicit `(u32, u32)` surface extent — not a `Window` type. `winit` is a dev-dependency
-only, used by the examples to obtain those handles. This split is deliberate: window/event-loop ownership
-stays with whichever application embeds the renderer, so the two intended consumers (which may already have
-their own main loops) aren't forced into this crate's choices.
+**Window handles, not window ownership**: the renderer takes handles (`RawDisplayHandle` +
+`RawWindowHandle`, from `raw-window-handle`, a direct dependency) plus an explicit `(u32, u32)` surface
+extent — not a `Window` type. `winit` is a dev-dependency only, used by the examples to obtain those
+handles. This split is deliberate: window/event-loop ownership stays with whichever application embeds
+the renderer, so the two intended consumers (which may already have their own main loops) aren't forced
+into this crate's choices.
+
+Spec 012 added **two constructors** over this split (see [spec 012](specs/012-resource-ownership-and-memory-safety.md)):
+`VulkanRenderer::with_window(Arc<W: HasWindowHandle + HasDisplayHandle>, …)` is the **safe default** —
+the renderer retains the window owner so the surface's window-lifetime contract holds by construction;
+and `unsafe fn new(RawDisplayHandle, RawWindowHandle, …)` is the raw-handle escape hatch for consumers
+that own their own loop and don't want the renderer holding a window reference. The safe path softens
+"no window ownership" only for callers that opt into it. `VulkanRenderer`'s fields and the low-level
+owners (`VulkanInstance`/`VulkanDevice`/`VulkanSwapchain`/…) are private — the `renderer` module is not
+`pub`; only the data types and `VulkanRenderer` are re-exported from the crate root.
 
 `src/math.rs` is a thin convenience layer over `m2s2-math`: type aliases (`Mat4`, `Vec2/3/4`, `Point2f/3f`)
 and free functions (`perspective`, `look_at`, `translate`, `rotate`) that call `m2s2-math`'s
