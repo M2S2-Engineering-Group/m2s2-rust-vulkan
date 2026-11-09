@@ -59,10 +59,13 @@ otherwise:
 
 This is a finite artistic falloff with peak strength near the light and zero at the range boundary;
 it is explicitly not inverse-square attenuation. Gate specular by the front-facing conditions in 013.
-When squared distance is <= a named minimum (proposed 1e-12 world-units squared), contribute zero rather
-than normalize an undefined direction at the exact light position. Use the same named degeneracy
-policy as 013 where applicable. World-space numeric/transform validity retains the renderer's caller
-contract; robust large-world coordinates are not introduced here.
+The degeneracy check runs first, before the range check: when squared distance (Q-P)·(Q-P) is <= a
+named minimum (proposed 1e-12 world-units squared), contribute zero immediately rather than normalize
+an undefined direction at the exact light position — this guard sits upstream of computing `d`, `L`,
+or `t`, not as a special case of the falloff formula. Only once that guard passes does the `d >= range`
+branch and the `t*t` falloff apply. Use the same named degeneracy policy as 013 where applicable.
+World-space numeric/transform validity retains the renderer's caller contract; robust large-world
+coordinates are not introduced here.
 
 Compute ambient once from the directional/scene ambient term. Sum directional and point contributions;
 do not multiply ambient by light count. Do not tint specular by diffuse albedo. Texture color decoding
@@ -89,15 +92,36 @@ set bind covers the complete lighting state for that frame.
 
 No image, sampler, or per-light allocation is created. Camera/texture/instance resources remain
 unchanged. Resize does not recreate the fixed light list. Constructor rollback and teardown follow
-012; the larger light buffer must satisfy the device's uniform-range limit before allocation.
+012. No uniform-buffer-range device-limit check exists today (only `max_push_constants_size` is
+tracked, in `device.rs`/`pipeline.rs`'s `validate_push_limit`); this spec adds a new one, following
+that function's shape, checking the 320-byte `SceneLightUniforms` against a new
+`max_uniform_buffer_range` field on `VulkanDevice` before the `Light` uniform is allocated. In
+practice 320 bytes is far below Vulkan's guaranteed-minimum `maxUniformBufferRange` (16384), so this
+check is a defensive floor, not an expected failure path.
 
 ## Interactions and demonstration
 
 `light.rs` owns the public point value, validation/atomic replacement, and padded scene-light payload.
 Extend the existing Light wrapper instead of creating a parallel point-only uniform implementation.
-`mod.rs` stores bounded CPU light state; command.rs uploads once per submitted frame. Both scene shader
-variants from 017, if implemented, share directional/point response functions; no duplicated shading
-formula or stale light layout between variants. Recompile/commit/validate changed SPIR-V.
+`mod.rs` stores bounded CPU light state; command.rs uploads once per submitted frame.
+
+`triangle.frag` currently inlines directional diffuse/specular directly in `main()` (no reusable
+function exists yet — see `shaders/triangle.frag`). This spec extracts a new `vec3
+blinnPhongSpecular(vec3 N, vec3 L, vec3 V, vec3 specularColor, float shininess)` function (parameterized
+so both the directional light and each point light call the same code, computed once per invocation
+rather than copy-pasted) — this is new refactoring work, not reuse of something already factored out.
+The camera-to-surface vector `V` and its degeneracy/front-facing guards are computed once per fragment
+and shared across the directional call and every point-light call. Both scene shader variants from 017,
+if implemented, share this same function; no duplicated shading formula or stale light layout between
+variants. Recompile/commit/validate changed SPIR-V.
+
+**`headless.rs` requires a real interface change, not just internal wiring.** `HeadlessRenderer::render_frame`
+currently hardcodes `DirectionalLight::default()` with no parameter for any custom light state, and
+has no way to pass point lights at all. Its signature must grow a `directional_light: &DirectionalLight`
+and `point_lights: &[PointLight]` parameter alongside the existing `objects`/`camera`, matching whatever
+`command::FrameContext::draw_frame`'s analogous parameters become. Without this change, spec 018's
+entire GPU acceptance test plan (below) is unimplementable, since there is currently no way to render a
+scene with a non-default light configuration headlessly.
 
 Cube example: two differently colored positioned lights with overlapping finite ranges, a stationary
 or disabled directional diffuse term, and the existing movable camera. Move one light along a known
@@ -112,22 +136,51 @@ zero/HDR colors, and unchanged prior list after any invalid element. Check 320-b
 uniform-range/device-limit handling and fixed-buffer bounds. Test real production payload construction,
 not an independent approximation.
 
-GPU shader acceptance: zero points matches the 013 baseline; one light illuminates nearby surfaces;
-colored lights add; beyond range contributes zero; near-boundary falloff is smooth; no invalid output
-at a light position; specular follows camera position; ambient does not grow with point count. Use
-known geometry/light positions and read actual pixels with agreed tolerance. Test dynamic per-frame
-updates with two frames in flight, all eight lights, text, empty scenes, resize and clean teardown under
-synchronization validation. With 017, directional visibility must not incorrectly darken point-light
-contributions. Do not claim CPU reference math proves the GLSL result.
+GPU shader acceptance uses spec 019's headless/golden-image infrastructure (see Resolved decisions):
+zero points matches the 013 baseline; one light illuminates nearby surfaces; colored lights add;
+beyond range contributes zero; near-boundary falloff is smooth; no invalid output at a light position;
+specular follows camera position; ambient does not grow with point count. Use `HeadlessRenderer` with
+known geometry/light positions and `assert_matches_golden` against committed reference PNGs at
+spec 019's default tolerance (2/255 per channel). Test dynamic per-frame updates with two frames in
+flight, all eight lights, text, empty scenes, resize and clean teardown under synchronization
+validation (manual run, same as prior specs — spec 019 did not build resize/text coverage). With 017
+(not yet implemented), directional visibility must not incorrectly darken point-light contributions —
+deferred until 017 lands. Do not claim CPU reference math proves the GLSL result; each golden-image
+test reads the actual shader's rendered output.
 
-Run all quality gates/doctests and shader compilation/validation. GPU tests stay opt-in for CPU CI.
+Run all quality gates/doctests and shader compilation/validation. GPU golden-image tests are
+`#[ignore]`d by default (consistent with spec 019) and run locally via `cargo test -- --ignored`; a
+machine with a Vulkan driver must generate each golden PNG once with `M2S2_UPDATE_GOLDEN=1` before the
+comparison tests can pass, same workflow spec 019 documented in `CLAUDE.md`.
+
+## Resolved decisions (2026-11-08)
+
+- **Bounded forward-light model:** accepted as proposed — up to `MAX_POINT_LIGHTS = 8` lights, squared
+  artistic falloff (`t = 1 - d/range; attenuation = t*t`), zero contribution at/beyond `range`. Not
+  physically based inverse-square; this is an intentional, bounded, finite-range model matching the
+  spec's stated Non-goals.
+- **Degenerate light position:** accepted as proposed — when squared distance is below the named
+  minimum (1e-12, matching 013's degeneracy policy), contribute zero rather than defining an arbitrary
+  light direction. Consistent with 013's "never normalize a zero vector" rule.
+- **Shared shader organization:** accepted as proposed — the point-light response reuses 013's existing
+  Blinn–Phong diffuse/specular functions in `triangle.frag`, called once per active light with that
+  light's `L`, and summed; no duplicated shading formula. 017's shadow visibility (when implemented)
+  gates only the directional term, per this spec's Dependencies note — point lights stay unaffected
+  until a point-light shadow spec is written (explicitly a Non-goal here).
+- **GPU verification method:** **changed from the spec's original manual-visual-check assumption.**
+  Spec 019 (headless rendering + golden-image comparison) is now implemented and merged — built
+  specifically so specs like this one could get real automated pixel-comparison acceptance tests
+  instead of a human eyeballing the cube example. This spec's GPU acceptance tests use
+  `HeadlessRenderer` + `assert_matches_golden` at spec 019's default tolerance (2/255 per channel per
+  channel), covering the scenarios listed in the Test plan's GPU section above. Golden PNGs are
+  generated once by the user (same `M2S2_UPDATE_GOLDEN=1` handoff spec 019 established) and committed
+  under `testdata/golden/`. Resize/text/empty-scene/synchronization-validation checks remain a manual
+  run on the cube example, since spec 019 did not build automated coverage for those paths.
 
 ## Open questions for review
 
-- Accept eight lights and a squared finite-range falloff as the initial bounded forward-light model?
-- Accept zero contribution at the exact light position instead of defining an arbitrary light direction?
-- Confirm the shared shader organization and numerical comparison tolerance after 013 review.
+None blocking. Everything above was a design-blocking decision; all are resolved.
 
 ## Outcome
 
-Pending design review and implementation. Spot lights and point-light shadows remain future specs.
+Pending implementation.
