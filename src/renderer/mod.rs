@@ -5,6 +5,8 @@ pub mod command;
 pub mod depth;
 pub mod device;
 pub mod diagnostics;
+#[cfg(test)]
+pub(crate) mod headless;
 mod image;
 pub mod instance;
 pub mod light;
