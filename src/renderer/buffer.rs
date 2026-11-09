@@ -195,6 +195,16 @@ impl Buffer {
         self.len
     }
 
+    /// Read-only view into this buffer's persistent mapping (the write-direction counterpart to
+    /// `write_mapped`), for CPU readback of a `new_host_visible_mapped` buffer the GPU has written
+    /// into (e.g. via `vkCmdCopyImageToBuffer`). `None` if unmapped. `#[cfg(test)]`: its only reader
+    /// is `HeadlessRenderer::render_frame` (`renderer::headless`), itself `#[cfg(test)]`-only —
+    /// without this, a non-test build would see the method as dead code.
+    #[cfg(test)]
+    pub(crate) fn mapped_bytes(&self) -> Option<&[u8]> {
+        self.allocation.as_ref()?.mapped_slice()
+    }
+
     /// Destroy the buffer and return its allocation to the allocator. Must run before the
     /// `Allocator` is dropped.
     pub(crate) fn destroy(self, device: &VulkanDevice, allocator: &mut Allocator) {

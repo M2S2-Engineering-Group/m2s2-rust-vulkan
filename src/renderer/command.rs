@@ -498,13 +498,13 @@ impl FrameContext {
 }
 
 // One emission path for Vulkan recording and CPU tests; no per-frame command list allocation.
-enum ObjectCommand<'a> {
+pub(super) enum ObjectCommand<'a> {
     BindTexture(vk::DescriptorSet),
     PushModel(&'a [u8]),
     DrawIndexed(u32),
 }
 
-fn emit_object_draws(
+pub(super) fn emit_object_draws(
     objects: &[Object],
     index_count: u32,
     texture_sets: &[vk::DescriptorSet],

@@ -1,6 +1,4 @@
 use crate::error::{Result, VulkanError};
-#[cfg(test)]
-use crate::renderer::instance;
 use crate::renderer::instance::VulkanInstance;
 use ash::{vk, Device};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
@@ -466,15 +464,5 @@ mod tests {
             VulkanDevice::score_device_type(vk::PhysicalDeviceType::OTHER),
             0
         );
-    }
-
-    #[test]
-    #[ignore = "needs a real Vulkan driver"]
-    fn headless_instance_and_device_construct_and_tear_down() {
-        let instance = super::instance::VulkanInstance::new_headless().expect("headless instance");
-        let device = VulkanDevice::new_headless(&instance).expect("headless device");
-        assert_eq!(instance.validation_error_count(), 0);
-        drop(device);
-        drop(instance);
     }
 }
