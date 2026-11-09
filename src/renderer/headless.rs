@@ -378,7 +378,7 @@ impl HeadlessRenderer {
         self.light
             .as_mut()
             .expect("light present outside teardown")
-            .update(0, &DirectionalLight::default())?;
+            .update(0, &DirectionalLight::default(), &[])?;
 
         let dev = &self.device.device;
 

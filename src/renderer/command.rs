@@ -202,7 +202,7 @@ impl FrameContext {
         // so a later frame's wait would hang. Treat every post-reset failure as terminal.
         (|| -> Result<()> {
             uniforms.update(frame, camera)?;
-            light.update(frame, directional_light)?;
+            light.update(frame, directional_light, &[])?;
             if let Some(text) = text.as_deref_mut() {
                 text.update(frame, text_vertices)?;
             }

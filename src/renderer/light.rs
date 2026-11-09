@@ -66,28 +66,114 @@ impl Default for DirectionalLight {
     }
 }
 
-/// std140 mirror of the fragment shader's `LightUniforms` block: three `vec3`s, each 16-byte aligned,
-/// so each carries an explicit trailing `f32` of padding. Size 48, offsets 0/16/32.
+/// A single point light in world space. Ergonomic value type; converted to the std140 GPU layout
+/// (`PointLightUniforms`) internally as part of `SceneLightUniforms`.
+#[derive(Copy, Clone, Debug)]
+pub struct PointLight {
+    /// World-space position of the light. Components must be finite.
+    pub position: Vec3,
+    /// Finite, nonnegative diffuse light color/intensity (values above one are allowed).
+    pub color: Vec3,
+    /// Finite, positive attenuation range: distance at which the light's contribution falls to zero.
+    pub range: f32,
+}
+
+/// Maximum number of simultaneous point lights the fragment shader's `SceneLightUniforms` block
+/// supports. Matches the `points` array length baked into that struct's std140 layout.
+pub const MAX_POINT_LIGHTS: usize = 8;
+
+/// Validates the whole slice up front (length first, then every element) and returns on the first
+/// violation without mutating anything. Callers that hold previous state (e.g. Task 2's
+/// `set_point_lights`) must call this before touching their own stored list, so a rejected call
+/// leaves prior state untouched.
+///
+/// `#[allow(dead_code)]`: no non-test caller exists yet — Task 2's `set_point_lights` is the first
+/// one. Exercised today only by this module's `#[cfg(test)]` tests.
+#[allow(dead_code)]
+pub(crate) fn validate_point_lights(lights: &[PointLight]) -> Result<()> {
+    if lights.len() > MAX_POINT_LIGHTS {
+        return Err(VulkanError::ValidationError(format!(
+            "at most {MAX_POINT_LIGHTS} point lights are supported, got {}",
+            lights.len()
+        )));
+    }
+    for light in lights {
+        if !(0..3).all(|i| light.position[i].is_finite()) {
+            return Err(VulkanError::ValidationError(
+                "point light position must be finite".into(),
+            ));
+        }
+        if !(0..3).all(|i| light.color[i].is_finite() && light.color[i] >= 0.0) {
+            return Err(VulkanError::ValidationError(
+                "point light color must be finite and nonnegative".into(),
+            ));
+        }
+        if !light.range.is_finite() || light.range <= 0.0 {
+            return Err(VulkanError::ValidationError(
+                "point light range must be finite and positive".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// std140 mirror of one entry in the fragment shader's `points` array: `vec3 position`, `float
+/// range`, `vec3 color`, with an explicit trailing `f32` of padding so the struct's size (32) is a
+/// multiple of its largest member's alignment (16), matching GLSL's array-stride rule. Offsets
+/// 0/12/16, size 32.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct LightUniforms {
+pub(crate) struct PointLightUniforms {
+    pub position: Vec3,
+    pub range: f32,
+    pub color: Vec3,
+    pub _pad: f32,
+}
+
+/// std140 mirror of the fragment shader's `SceneLightUniforms` block: the directional light's three
+/// `vec3`s (byte-identical in layout to the old `LightUniforms`, so the shader's existing block still
+/// reads correctly), a point-light count, and a fixed-size array of `PointLightUniforms`. Size 320,
+/// offsets: `direction` 0, `color` 16, `ambient` 32, `point_count` 48, `points` 64.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct SceneLightUniforms {
     pub direction: Vec3,
     pub _pad0: f32,
     pub color: Vec3,
     pub _pad1: f32,
     pub ambient: Vec3,
     pub _pad2: f32,
+    pub point_count: u32,
+    pub _pad3: [u32; 3],
+    pub points: [PointLightUniforms; MAX_POINT_LIGHTS],
 }
 
-impl From<&DirectionalLight> for LightUniforms {
-    fn from(light: &DirectionalLight) -> Self {
+impl SceneLightUniforms {
+    /// Builds the full 320-byte struct from a directional light and up to `MAX_POINT_LIGHTS` point
+    /// lights, zeroing every unused point slot. `points.len()` is trusted to already be
+    /// `<= MAX_POINT_LIGHTS` (callers such as Task 2's `set_point_lights` enforce that upstream via
+    /// `validate_point_lights`).
+    pub(crate) fn new(directional: &DirectionalLight, points: &[PointLight]) -> Self {
+        debug_assert!(points.len() <= MAX_POINT_LIGHTS);
+        let mut point_uniforms = [bytemuck::Zeroable::zeroed(); MAX_POINT_LIGHTS];
+        for (slot, point) in point_uniforms.iter_mut().zip(points.iter()) {
+            *slot = PointLightUniforms {
+                position: point.position,
+                range: point.range,
+                color: point.color,
+                _pad: 0.0,
+            };
+        }
         Self {
-            direction: light.direction,
+            direction: directional.direction,
             _pad0: 0.0,
-            color: light.color,
+            color: directional.color,
             _pad1: 0.0,
-            ambient: light.ambient,
+            ambient: directional.ambient,
             _pad2: 0.0,
+            point_count: points.len() as u32,
+            _pad3: [0; 3],
+            points: point_uniforms,
         }
     }
 }
@@ -96,28 +182,47 @@ impl From<&DirectionalLight> for LightUniforms {
 /// `layout(set = 2, binding = 0)`).
 const LIGHT_BINDING: u32 = 0;
 
-/// The light uniform: a `PerFrameUniform` carrying `LightUniforms` at `LIGHT_BINDING`, fragment stage.
+/// Fails if `SceneLightUniforms` (320 bytes) would not fit within `limit`
+/// (`maxUniformBufferRange`), shaped like `pipeline.rs`'s `validate_push_limit`.
+pub(crate) fn validate_light_uniform_limit(limit: u32) -> Result<()> {
+    let required = std::mem::size_of::<SceneLightUniforms>() as u32;
+    if required > limit {
+        return Err(VulkanError::InitializationError(format!(
+            "scene light uniform requires {required} bytes, device supports {limit}",
+        )));
+    }
+    Ok(())
+}
+
+/// The light uniform: a `PerFrameUniform` carrying `SceneLightUniforms` at `LIGHT_BINDING`, fragment
+/// stage.
 pub(crate) struct Light {
     inner: PerFrameUniform,
 }
 
 impl Light {
     pub(crate) fn new(device: &VulkanDevice, allocator: &mut Allocator) -> Result<Self> {
+        validate_light_uniform_limit(device.max_uniform_buffer_range)?;
         let inner = PerFrameUniform::new(
             device,
             allocator,
-            std::mem::size_of::<LightUniforms>() as u64,
+            std::mem::size_of::<SceneLightUniforms>() as u64,
             LIGHT_BINDING,
             vk::ShaderStageFlags::FRAGMENT,
         )?;
         Ok(Self { inner })
     }
 
-    /// Write `light` into frame `frame`'s mapped buffer (converted to std140). The caller must have
-    /// waited on that frame's in-flight fence first, so the GPU isn't mid-read.
-    pub(crate) fn update(&mut self, frame: usize, light: &DirectionalLight) -> Result<()> {
-        self.inner
-            .update(frame, bytemuck::bytes_of(&LightUniforms::from(light)))
+    /// Write `directional` and `points` into frame `frame`'s mapped buffer (converted to std140).
+    /// The caller must have waited on that frame's in-flight fence first, so the GPU isn't mid-read.
+    pub(crate) fn update(
+        &mut self,
+        frame: usize,
+        directional: &DirectionalLight,
+        points: &[PointLight],
+    ) -> Result<()> {
+        let scene = SceneLightUniforms::new(directional, points);
+        self.inner.update(frame, bytemuck::bytes_of(&scene))
     }
 
     pub(crate) fn descriptor_set_layout(&self) -> vk::DescriptorSetLayout {
@@ -202,11 +307,21 @@ mod tests {
     }
 
     #[test]
-    fn light_uniforms_match_std140_layout() {
-        assert_eq!(std::mem::size_of::<LightUniforms>(), 48);
-        assert_eq!(std::mem::offset_of!(LightUniforms, direction), 0);
-        assert_eq!(std::mem::offset_of!(LightUniforms, color), 16);
-        assert_eq!(std::mem::offset_of!(LightUniforms, ambient), 32);
+    fn point_light_uniforms_match_std140_layout() {
+        assert_eq!(std::mem::size_of::<PointLightUniforms>(), 32);
+        assert_eq!(std::mem::offset_of!(PointLightUniforms, position), 0);
+        assert_eq!(std::mem::offset_of!(PointLightUniforms, range), 12);
+        assert_eq!(std::mem::offset_of!(PointLightUniforms, color), 16);
+    }
+
+    #[test]
+    fn scene_light_uniforms_match_std140_layout() {
+        assert_eq!(std::mem::size_of::<SceneLightUniforms>(), 320);
+        assert_eq!(std::mem::offset_of!(SceneLightUniforms, direction), 0);
+        assert_eq!(std::mem::offset_of!(SceneLightUniforms, color), 16);
+        assert_eq!(std::mem::offset_of!(SceneLightUniforms, ambient), 32);
+        assert_eq!(std::mem::offset_of!(SceneLightUniforms, point_count), 48);
+        assert_eq!(std::mem::offset_of!(SceneLightUniforms, points), 64);
     }
 
     #[test]
@@ -216,11 +331,130 @@ mod tests {
             color: Vec3::new(0.4, 0.5, 0.6),
             ambient: Vec3::new(0.1, 0.1, 0.1),
         };
-        let u = LightUniforms::from(&light);
+        let u = SceneLightUniforms::new(&light, &[]);
         assert_eq!(u.direction, light.direction);
         assert_eq!(u.color, light.color);
         assert_eq!(u.ambient, light.ambient);
         assert_eq!((u._pad0, u._pad1, u._pad2), (0.0, 0.0, 0.0));
+        assert_eq!(u.point_count, 0);
+    }
+
+    fn valid_point_light() -> PointLight {
+        PointLight {
+            position: Vec3::new(1.0, 2.0, 3.0),
+            color: Vec3::new(0.5, 0.5, 0.5),
+            range: 10.0,
+        }
+    }
+
+    #[test]
+    fn validate_point_lights_accepts_empty_and_max_count() {
+        assert!(validate_point_lights(&[]).is_ok());
+        let lights = vec![valid_point_light(); MAX_POINT_LIGHTS];
+        assert!(validate_point_lights(&lights).is_ok());
+    }
+
+    #[test]
+    fn validate_point_lights_rejects_too_many() {
+        let lights = vec![valid_point_light(); MAX_POINT_LIGHTS + 1];
+        assert!(matches!(
+            validate_point_lights(&lights),
+            Err(VulkanError::ValidationError(_))
+        ));
+    }
+
+    #[test]
+    fn validate_point_lights_rejects_invalid_individual_fields() {
+        let invalid_values = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+
+        for &bad in &invalid_values {
+            for component in 0..3 {
+                let mut light = valid_point_light();
+                light.position[component] = bad;
+                assert!(validate_point_lights(&[light]).is_err());
+            }
+        }
+
+        for &bad in &invalid_values {
+            for component in 0..3 {
+                let mut light = valid_point_light();
+                light.color[component] = bad;
+                assert!(validate_point_lights(&[light]).is_err());
+            }
+        }
+
+        for component in 0..3 {
+            let mut light = valid_point_light();
+            light.color[component] = -1.0;
+            assert!(validate_point_lights(&[light]).is_err());
+        }
+
+        for &bad in &invalid_values {
+            let mut light = valid_point_light();
+            light.range = bad;
+            assert!(validate_point_lights(&[light]).is_err());
+        }
+
+        let mut light = valid_point_light();
+        light.range = 0.0;
+        assert!(validate_point_lights(&[light]).is_err());
+
+        let mut light = valid_point_light();
+        light.range = -1.0;
+        assert!(validate_point_lights(&[light]).is_err());
+    }
+
+    #[test]
+    fn validate_point_lights_rejects_whole_list_on_trailing_invalid_light() {
+        let mut lights = vec![valid_point_light(); MAX_POINT_LIGHTS];
+        let mut invalid = valid_point_light();
+        invalid.range = -1.0;
+        lights.push(invalid);
+        assert_eq!(lights.len(), MAX_POINT_LIGHTS + 1);
+        assert!(validate_point_lights(&lights).is_err());
+    }
+
+    #[test]
+    fn scene_light_uniforms_builds_from_directional_and_points() {
+        let directional = DirectionalLight::default();
+        let points = [
+            PointLight {
+                position: Vec3::new(1.0, 2.0, 3.0),
+                color: Vec3::new(0.1, 0.2, 0.3),
+                range: 5.0,
+            },
+            PointLight {
+                position: Vec3::new(4.0, 5.0, 6.0),
+                color: Vec3::new(0.4, 0.5, 0.6),
+                range: 6.0,
+            },
+            PointLight {
+                position: Vec3::new(7.0, 8.0, 9.0),
+                color: Vec3::new(0.7, 0.8, 0.9),
+                range: 7.0,
+            },
+        ];
+        let scene = SceneLightUniforms::new(&directional, &points);
+        assert_eq!(scene.point_count, 3);
+        for (i, point) in points.iter().enumerate() {
+            assert_eq!(scene.points[i].position, point.position);
+            assert_eq!(scene.points[i].range, point.range);
+            assert_eq!(scene.points[i].color, point.color);
+            assert_eq!(scene.points[i]._pad, 0.0);
+        }
+        for point in &scene.points[3..MAX_POINT_LIGHTS] {
+            assert_eq!(point.position, Vec3::new(0.0, 0.0, 0.0));
+            assert_eq!(point.range, 0.0);
+            assert_eq!(point.color, Vec3::new(0.0, 0.0, 0.0));
+            assert_eq!(point._pad, 0.0);
+        }
+    }
+
+    #[test]
+    fn validate_light_uniform_limit_matches_scene_light_uniforms_size() {
+        assert!(validate_light_uniform_limit(320).is_ok());
+        assert!(validate_light_uniform_limit(319).is_err());
+        assert!(validate_light_uniform_limit(16384).is_ok());
     }
 
     #[test]
