@@ -1,6 +1,6 @@
 # 019: Headless offscreen rendering and golden-image tests
 
-**Status**: Draft for review; not implemented.
+**Status**: Implemented and verified (CPU gates pass; GPU acceptance confirmed by user).
 **Roadmap item**: [Engine-level concerns](../ROADMAP.md#phase-5-engine-level-concerns) — test
 infrastructure, pulled forward as a prerequisite for spec 018's GPU acceptance tests.
 **Dependencies**: Spec 009 (Vulkan 1.3, dynamic rendering core), spec 012 (resource-ownership
@@ -323,4 +323,53 @@ naming convention.
 
 ## Outcome
 
-(Filled in after implementation.)
+Implemented across five tasks, entirely `#[cfg(test)] pub(crate)` — zero public API, zero
+production-build footprint. `VulkanInstance::new_headless()` requests no surface/platform-surface
+extensions and `VulkanDevice::new_headless()` requires only a graphics-capable queue family (no
+present support, no `VK_KHR_swapchain`); both gained an assertable `validation_error_count()` via a
+null-checked debug-messenger `pUserData` pointer to an `AtomicU32` (production `with_window`/`unsafe
+new` pass a null pointer and are unaffected — confirmed byte-for-byte unchanged by the final review).
+`OffscreenTarget` (`src/renderer/headless.rs`) selects `R8G8B8A8_UNORM` preferred / `B8G8R8A8_UNORM`
+fallback via the same queried-not-asserted pattern as `depth.rs`, and tracks render state with a
+single `bool` (`has_rendered`) — sufficient because only two barrier states exist: never-rendered
+(`UNDEFINED → COLOR_ATTACHMENT_OPTIMAL`, empty access, `TOP_OF_PIPE`) and previously-rendered
+(`TRANSFER_SRC_OPTIMAL → COLOR_ATTACHMENT_OPTIMAL`, `TRANSFER_READ`, `TRANSFER`). `HeadlessRenderer`
+mirrors `VulkanRenderer`'s exact construction order, field-wrapper split (`ManuallyDrop` for
+device/instance/pipeline, `Option` for the rest), and reverse-order `Drop`; its one-shot command
+submission mirrors `upload::submit_once`'s `Cleanup`-guard/`SubmitState` pattern line-for-line, so a
+transient command pool is destroyed even if recording fails partway through. `golden.rs` implements
+`assert_matches_golden` — per-channel absolute tolerance (default 2/255), dimension check before the
+pixel loop, an `M2S2_UPDATE_GOLDEN` env var to regenerate, and one combined "missing or failed to
+decode" error message naming that env var in both cases (a decode-only variant of this message
+initially missed the env-var mention; caught by task review and fixed in the same branch). Golden
+PNGs live under `testdata/golden/` at the repo root. The end-to-end self-test
+(`self_test_scene_matches_golden_with_zero_validation_errors`) wires every piece together: headless
+instance/device → `HeadlessRenderer` → `render_frame` → `assert_matches_golden` →
+`validation_error_count() == 0`.
+
+Verified (CPU): 73 unit tests pass, 5 `#[ignore]`d (GPU-dependent), plus 2 example-crate tests and 3
+doctests; all four quality gates (`cargo fmt --all -- --check`, `cargo clippy --all-targets
+--all-features -- -D warnings`, `cargo build --all-targets`, `cargo test --all-targets`) clean.
+
+**GPU acceptance: confirmed by the user.** All 5 previously-`#[ignore]`d tests
+(`headless_instance_and_device_construct_and_tear_down`,
+`headless_renderer_constructs_and_tears_down`, `render_frame_is_deterministic_across_repeated_calls`,
+`offscreen_target_constructs_tracks_render_state_and_tears_down`, and
+`self_test_scene_matches_golden_with_zero_validation_errors`) pass on real Vulkan hardware with zero
+validation errors. The first golden image, `testdata/golden/headless_self_test.png`, was generated
+with `M2S2_UPDATE_GOLDEN=1` and is committed to the repo — regenerating it against a different driver
+(e.g. once `lavapipe` is wired into CI, per this spec's deferred-to-later-section note above) is a
+one-time `M2S2_UPDATE_GOLDEN=1` re-run, not a design change.
+
+An independent whole-branch review (model: Opus, range of all 5 tasks) found 0 Critical, 0 Important
+issues, and confirmed the production footprint is provably zero and every item in the plan's Review
+Focus section holds against the diff. Three Minor findings were deferred as non-blocking: `golden.rs`
+assumes a decoded golden is 8-bit RGBA with no `color_type`/`bit_depth` guard (a non-RGBA8 golden
+would panic rather than error cleanly — low risk since goldens are only ever self-generated via
+`M2S2_UPDATE_GOLDEN`); the readback buffer uses `MemoryLocation::CpuToGpu` rather than the more
+idiomatic `GpuToCpu` for a GPU→CPU read (functionally correct — `CpuToGpu` is `HOST_COHERENT` under
+this project's gpu-allocator 0.28 Vulkan backend, confirmed without GPU access by code inspection);
+and the release-mode `validation_error_count() → 0` body is never actually compiled by the standard
+gates (debug-only), so this spec's claim that a CPU test covers that path is slightly overstated.
+
+Local-only for now, CI deferred until `lavapipe` is wired in, per this spec's resolved decisions.

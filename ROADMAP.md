@@ -129,6 +129,11 @@ This is the phase the Phase 1 decisions (dynamic rendering, per-pass-splittable 
 
 Cross-cutting concerns that matter because this is a *reusable library*, not a single application.
 
+- [x] **Headless rendering and golden-image test infrastructure**: `#[cfg(test)]`-only offscreen
+      rendering (no window/surface) plus PNG-backed golden-image comparison with tolerance, so any
+      future rendering feature can be tested for actual pixel correctness, not just "it compiles and
+      doesn't crash." Pulled forward as a prerequisite for spec 018 (point lighting)'s GPU acceptance
+      tests — see spec 019.
 - [ ] **Debug tooling integration**: `VK_EXT_debug_utils` object naming and command buffer labels, so
       RenderDoc/validation output is legible per-consumer
 - [ ] **Bindless / descriptor indexing**: reduces per-draw descriptor churn, relevant once Phase 3's asset
