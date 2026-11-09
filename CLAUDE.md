@@ -42,6 +42,25 @@ locally and in CI:
 
 There's no rust-toolchain pin — CI and local dev both use whatever stable toolchain is installed.
 
+### Headless GPU tests and golden images
+
+`src/renderer/headless.rs` and `src/renderer/golden.rs` (both `#[cfg(test)]`-only modules) exercise real
+Vulkan device creation, offscreen rendering, and pixel-level output against a reference PNG, none of which
+CI's driver-less runner can do (see Quality gates above). Those tests are `#[ignore]`d by default so
+`cargo test --all-targets` stays green on every machine; running them requires a real Vulkan driver.
+
+- Run the full ignored set on a machine with a GPU/driver: `cargo test -- --ignored`.
+- `self_test_scene_matches_golden_with_zero_validation_errors` (in `renderer::headless`) compares its
+  rendered frame against `testdata/golden/headless_self_test.png` via `assert_matches_golden` (per-channel
+  tolerance, see `golden.rs`). To create or regenerate that golden image after an intentional rendering
+  change, run the same test with `M2S2_UPDATE_GOLDEN=1` set — this makes the comparison write the actual
+  output as the new golden instead of diffing against it — then re-run without the env var to confirm the
+  test now passes against what you just wrote, and commit the resulting PNG under `testdata/golden/`:
+  ```bash
+  M2S2_UPDATE_GOLDEN=1 cargo test --lib renderer::headless -- --ignored self_test_scene_matches_golden_with_zero_validation_errors
+  cargo test --lib renderer::headless -- --ignored self_test_scene_matches_golden_with_zero_validation_errors
+  ```
+
 ### Commit message format (required for releases)
 
 Commit subjects must follow [Conventional Commits](https://www.conventionalcommits.org):

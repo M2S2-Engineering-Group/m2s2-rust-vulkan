@@ -968,4 +968,38 @@ mod tests {
         );
         assert_eq!(renderer.validation_error_count(), 0);
     }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/headless_self_test.png"]
+    fn self_test_scene_matches_golden_with_zero_validation_errors() {
+        use crate::math::{to_radians, Mat4, Vec3};
+        use crate::renderer::golden::assert_matches_golden;
+        use crate::renderer::texture::SpecularMaterial;
+
+        let (vertices, indices) = lit_untextured_cube();
+        let mut renderer =
+            HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
+        let camera = uniform::Camera {
+            view: crate::math::look_at(
+                &Vec3::new(2.0, 2.0, 2.0),
+                &Vec3::new(0.0, 0.0, 0.0),
+                &Vec3::new(0.0, 1.0, 0.0),
+            ),
+            proj: crate::math::perspective(to_radians(45.0), 1.0, 0.1, 10.0),
+            position: Vec3::new(2.0, 2.0, 2.0),
+        };
+        let objects = [Object {
+            model: Mat4::IDENTITY,
+            texture: None,
+            specular: SpecularMaterial::default(),
+        }];
+        let pixels = renderer.render_frame(&objects, camera).expect("render");
+
+        let golden_path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/golden/headless_self_test.png"
+        ));
+        assert_matches_golden(&pixels, 64, 64, golden_path, 2).expect("pixel comparison");
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
 }
