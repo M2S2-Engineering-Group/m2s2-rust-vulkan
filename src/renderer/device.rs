@@ -1,4 +1,6 @@
 use crate::error::{Result, VulkanError};
+#[cfg(test)]
+use crate::renderer::instance;
 use crate::renderer::instance::VulkanInstance;
 use ash::{vk, Device};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
@@ -277,6 +279,133 @@ impl VulkanDevice {
             _ => None,
         })
     }
+
+    /// Returns the index of the first queue family with `vk::QueueFlags::GRAPHICS`, or `None` if
+    /// `physical_device` has none. Unlike `find_queue_families`, there is no surface to check
+    /// present support against — headless rendering never presents.
+    #[cfg(test)]
+    fn find_graphics_queue_family(
+        instance: &VulkanInstance,
+        physical_device: vk::PhysicalDevice,
+    ) -> Option<u32> {
+        let queue_families = unsafe {
+            instance
+                .instance
+                .get_physical_device_queue_family_properties(physical_device)
+        };
+
+        queue_families
+            .iter()
+            .position(|queue_family| queue_family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .map(|index| index as u32)
+    }
+
+    /// Picks the best-scoring physical device that has a graphics queue and meets the minimum API
+    /// version — mirrors `pick_physical_device`'s defensive empty-list/no-candidate handling, but
+    /// skips the extension and swapchain-support checks entirely since headless rendering never
+    /// presents.
+    #[cfg(test)]
+    fn pick_physical_device_headless(
+        instance: &VulkanInstance,
+    ) -> Result<(vk::PhysicalDevice, u32)> {
+        let physical_devices = unsafe {
+            instance
+                .instance
+                .enumerate_physical_devices()
+                .map_err(VulkanError::from)?
+        };
+
+        if physical_devices.is_empty() {
+            return Err(VulkanError::InitializationError(
+                "No Vulkan-compatible devices found".to_string(),
+            ));
+        }
+
+        let mut best: Option<(u32, vk::PhysicalDevice, u32)> = None;
+
+        for physical_device in physical_devices {
+            let Some(graphics_family) = Self::find_graphics_queue_family(instance, physical_device)
+            else {
+                continue;
+            };
+
+            let properties = unsafe {
+                instance
+                    .instance
+                    .get_physical_device_properties(physical_device)
+            };
+            if !meets_min_api_version(properties.api_version) {
+                continue;
+            }
+
+            let score = Self::score_device_type(properties.device_type);
+
+            if best
+                .as_ref()
+                .is_none_or(|(best_score, ..)| score > *best_score)
+            {
+                best = Some((score, physical_device, graphics_family));
+            }
+        }
+
+        best.map(|(_, physical_device, graphics_family)| (physical_device, graphics_family))
+            .ok_or_else(|| {
+                VulkanError::InitializationError(
+                    "No Vulkan device supports the required queue and API version for headless rendering"
+                        .to_string(),
+                )
+            })
+    }
+
+    /// Builds a device with no surface and no `VK_KHR_swapchain` extension — for headless (no
+    /// window, no display server) golden-image tests. There is only one queue family of interest,
+    /// so `present_queue`/`present_queue_family` are set equal to the graphics queue; no
+    /// swapchain-based code ever runs against a headless device.
+    #[cfg(test)]
+    pub(crate) fn new_headless(instance: &VulkanInstance) -> Result<Self> {
+        let (physical_device, graphics_family) = Self::pick_physical_device_headless(instance)?;
+
+        let queue_priorities = [1.0];
+        let queue_create_infos = [vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(graphics_family)
+            .queue_priorities(&queue_priorities)];
+
+        let device_features = vk::PhysicalDeviceFeatures::default();
+        let mut dynamic_rendering_features =
+            vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
+
+        let device_create_info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(&queue_create_infos)
+            .enabled_extension_names(&[])
+            .enabled_features(&device_features)
+            .push_next(&mut dynamic_rendering_features);
+
+        let device = unsafe {
+            instance
+                .instance
+                .create_device(physical_device, &device_create_info, None)
+                .map_err(VulkanError::from)?
+        };
+
+        let max_push_constants_size = unsafe {
+            instance
+                .instance
+                .get_physical_device_properties(physical_device)
+        }
+        .limits
+        .max_push_constants_size;
+        let graphics_queue = unsafe { device.get_device_queue(graphics_family, 0) };
+
+        Ok(Self {
+            physical_device,
+            max_push_constants_size,
+            device,
+            graphics_queue,
+            present_queue: graphics_queue,
+            graphics_queue_family: graphics_family,
+            present_queue_family: graphics_family,
+        })
+    }
 }
 
 /// True if `device_version` (a `VK_MAKE_API_VERSION`-encoded value) meets the engine's minimum.
@@ -337,5 +466,15 @@ mod tests {
             VulkanDevice::score_device_type(vk::PhysicalDeviceType::OTHER),
             0
         );
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver"]
+    fn headless_instance_and_device_construct_and_tear_down() {
+        let instance = super::instance::VulkanInstance::new_headless().expect("headless instance");
+        let device = VulkanDevice::new_headless(&instance).expect("headless device");
+        assert_eq!(instance.validation_error_count(), 0);
+        drop(device);
+        drop(instance);
     }
 }
