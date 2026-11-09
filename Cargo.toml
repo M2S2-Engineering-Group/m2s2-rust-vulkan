@@ -26,6 +26,8 @@ gpu-allocator = { version = "0.28", default-features = false, features = ["vulka
 # For examples and tests
 pollster = "0.3"
 winit = "0.29"
+# PNG encoding/decoding for golden-image tests
+png = "0.17"
 
 [[example]]
 name = "triangle"

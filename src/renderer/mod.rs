@@ -6,6 +6,8 @@ pub mod depth;
 pub mod device;
 pub mod diagnostics;
 #[cfg(test)]
+pub(crate) mod golden;
+#[cfg(test)]
 pub(crate) mod headless;
 mod image;
 pub mod instance;
