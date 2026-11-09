@@ -22,19 +22,19 @@ pub(crate) fn assert_matches_golden(
     }
 
     // Open and decode the golden image.
-    let file = std::fs::File::open(path).map_err(|_| {
+    let combined_error = || {
         format!(
             "no golden image at {path:?} (or it failed to decode): run with M2S2_UPDATE_GOLDEN=1 to create it"
         )
-    })?;
+    };
+
+    let file = std::fs::File::open(path).map_err(|_| combined_error())?;
     let decoder = png::Decoder::new(file);
-    let mut reader = decoder
-        .read_info()
-        .map_err(|e| format!("failed to decode PNG: {e}"))?;
+    let mut reader = decoder.read_info().map_err(|_| combined_error())?;
     let mut golden_pixels = vec![0u8; reader.output_buffer_size()];
     reader
         .next_frame(&mut golden_pixels)
-        .map_err(|e| format!("failed to read PNG frame: {e}"))?;
+        .map_err(|_| combined_error())?;
     let golden_info = reader.info();
 
     // Check dimensions match.
@@ -155,6 +155,20 @@ mod tests {
         assert!(
             err.to_lowercase().contains("dimension") || err.contains("2"),
             "error should mention the dimension mismatch: {err}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn corrupt_golden_without_update_flag_mentions_env_var() {
+        let path = std::env::temp_dir().join("m2s2_golden_corrupt.png");
+        // Write garbage bytes instead of a valid PNG
+        std::fs::write(&path, b"not a valid png file").unwrap();
+        std::env::remove_var("M2S2_UPDATE_GOLDEN");
+        let err = assert_matches_golden(&[0u8, 0, 0, 255], 1, 1, &path, 2).unwrap_err();
+        assert!(
+            err.contains("M2S2_UPDATE_GOLDEN"),
+            "error should mention the update flag even for corrupt PNG: {err}"
         );
         let _ = std::fs::remove_file(&path);
     }
