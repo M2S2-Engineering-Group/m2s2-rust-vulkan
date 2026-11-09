@@ -160,20 +160,35 @@ the full 320-byte struct, zeroing every unused point slot. `points.len()` is tru
 `<= MAX_POINT_LIGHTS` here (Task 2's `set_point_lights` enforces that upstream) — a `debug_assert!` is
 appropriate, not a runtime `Result`.
 
-- [ ] **Step 8: Update `Light::update`'s signature and callers within this file's tests**
+- [ ] **Step 8: Update `Light::update`'s signature, and patch its two call sites to keep the crate compiling**
 
 Change `Light::update(&mut self, frame, light: &DirectionalLight)` to `Light::update(&mut self, frame,
 directional: &DirectionalLight, points: &[PointLight])`, building `SceneLightUniforms` internally and
 writing it via the existing `self.inner.update(frame, bytemuck::bytes_of(&scene))` call. Update
 `Light::new`'s payload size from `size_of::<LightUniforms>()` to `size_of::<SceneLightUniforms>()`.
-This task does not fix the two external callers in `mod.rs`/`command.rs`/`headless.rs` — they will not
-compile until Task 2. Note this explicitly in your implementation report; it is expected, not a bug.
 
-- [ ] **Step 9: Run tests, confirm they pass**
+This crate must compile and its full test suite must pass at every commit (project-wide pre-commit
+hook enforces `cargo clippy --all-targets`/`cargo test --all-targets`; there is no way to land a commit
+that leaves the crate broken). So, as part of THIS step, patch the two call sites this signature
+change breaks with a literal placeholder — do NOT do any real feature wiring here, that is Task 2's
+job:
+- `src/renderer/command.rs`'s `draw_frame`, the line calling `light.update(frame, directional_light)`:
+  add a literal `&[]` third argument. Do not change `draw_frame`'s own parameter list — Task 2 Step 3
+  adds the real `point_lights: &[PointLight]` parameter and replaces this placeholder.
+- `src/renderer/headless.rs`'s `render_frame`, the line calling `self.light.update(0,
+  &DirectionalLight::default())`: add a literal `&[]` third argument. Do not change `render_frame`'s
+  own parameter list — Task 2 Step 4 adds the real parameters and replaces this placeholder.
 
-Run: `cargo test --lib renderer::light`
-Expected: PASS for everything in `light.rs`'s own test module. (The crate as a whole will not build
-yet — expected, see Step 8 — so do not run `cargo build --all-targets` until Step 13.)
+Both are one-line, mechanical, behavior-preserving edits (empty point-light list is already today's
+implicit behavior). `mod.rs` needs no change — it calls `draw_frame`, not `Light::update`, directly.
+
+- [ ] **Step 9: Run the full test suite**
+
+Run: `cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo
+build --all-targets && cargo test --all-targets`
+Expected: all clean, same pass/ignored counts as the branch baseline (this task adds new passing tests
+in `renderer::light`/`renderer::device` and changes no runtime behavior anywhere else — the two
+placeholder edits above are compile-fixes only, not feature changes).
 
 - [ ] **Step 10: Write failing test for the device uniform-range limit**
 
@@ -202,14 +217,15 @@ before constructing the `PerFrameUniform`.
 
 - [ ] **Step 13: Run the full test suite**
 
-Run: `cargo test --lib renderer::light renderer::device`
-Expected: PASS. (Still do not run the whole-crate build — `mod.rs`/`command.rs`/`headless.rs` remain
-broken until Task 2; this is expected.)
+Run: `cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo
+build --all-targets && cargo test --all-targets`
+Expected: all clean, same pass/ignored counts as Step 9 (the device-limit addition is CPU-only and
+changes no runtime behavior).
 
 - [ ] **Step 14: Commit**
 
 ```bash
-git add src/renderer/light.rs src/renderer/device.rs
+git add src/renderer/light.rs src/renderer/device.rs src/renderer/command.rs src/renderer/headless.rs
 git commit -m "feat(renderer): point light type, GPU layout, and uniform-range device limit"
 ```
 
@@ -225,7 +241,9 @@ git commit -m "feat(renderer): point light type, GPU layout, and uniform-range d
 
 **Interfaces:**
 - Consumes: Task 1's `PointLight`, `MAX_POINT_LIGHTS`, `validate_point_lights`, and `Light::update`'s
-  new three-argument signature.
+  new three-argument signature. Task 1 already left the crate compiling by patching
+  `command.rs`'s and `headless.rs`'s `Light::update` call sites with a literal `&[]` placeholder —
+  this task replaces those two placeholders with real data, it is not fixing broken code.
 - Produces: `impl VulkanRenderer { pub fn set_point_lights(&mut self, lights: &[PointLight]) ->
   Result<()>; }`; `command::FrameContext::draw_frame`'s signature grows a `point_lights: &[PointLight]`
   parameter (placed next to the existing `directional_light: &DirectionalLight` parameter);
@@ -258,19 +276,21 @@ with a validation error, preserves the previous list).
 - [ ] **Step 3: Thread `point_lights` through `command::FrameContext::draw_frame` and its one call site**
 
 Add `point_lights: &[PointLight]` to `draw_frame`'s parameter list (next to `directional_light`).
-Inside the function, change `light.update(frame, directional_light)` to `light.update(frame,
-directional_light, point_lights)`. Update `mod.rs`'s single call site (around the existing
-`self.light.as_mut().unwrap()` / `&self.directional_light` call) to pass `&self.point_lights` too.
+Inside the function, replace Task 1's `light.update(frame, directional_light, &[])` placeholder with
+`light.update(frame, directional_light, point_lights)`. Update `mod.rs`'s single call site (around the
+existing `self.light.as_mut().unwrap()` / `&self.directional_light` call) to pass `&self.point_lights`
+too.
 
 - [ ] **Step 4: Thread point lights through `HeadlessRenderer::render_frame`**
 
 Change `render_frame`'s signature from `(&mut self, objects: &[Object], camera: uniform::Camera)` to
 `(&mut self, objects: &[Object], camera: uniform::Camera, directional_light: &DirectionalLight,
-point_lights: &[PointLight])`. Replace the hardcoded `self.light.update(0, &DirectionalLight::default())`
-with `self.light.update(0, directional_light, point_lights)`. Update every existing call site in
-`headless.rs`'s own test module (`render_frame_is_deterministic_across_repeated_calls`'s two calls, and
-the end-to-end self-test from spec 019) to pass `&DirectionalLight::default()` and `&[]` — this
-preserves their current tested behavior exactly; do not change what they assert.
+point_lights: &[PointLight])`. Replace Task 1's `self.light.update(0, &DirectionalLight::default(),
+&[])` placeholder with `self.light.update(0, directional_light, point_lights)`. Update every existing
+call site in `headless.rs`'s own test module (`render_frame_is_deterministic_across_repeated_calls`'s
+two calls, and the end-to-end self-test from spec 019) to pass `&DirectionalLight::default()` and
+`&[]` as the two new arguments — this preserves their current tested behavior exactly; do not change
+what they assert.
 
 - [ ] **Step 5: Re-export `PointLight` and `MAX_POINT_LIGHTS` from `lib.rs`**
 
