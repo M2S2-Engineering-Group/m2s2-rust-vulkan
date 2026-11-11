@@ -2,8 +2,8 @@ use m2s2_rust_vulkan::math::{
     look_at, perspective, rotate, to_radians, translate, Vec2, Vec3, Vec4,
 };
 use m2s2_rust_vulkan::{
-    init_logging, Camera, Diagnostics, DirectionalLight, Index, Object, SpecularMaterial, TextDraw,
-    Vertex, VulkanRenderer,
+    init_logging, Camera, Diagnostics, DirectionalLight, Index, Object, PointLight,
+    SpecularMaterial, TextDraw, Vertex, VulkanRenderer,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -15,6 +15,12 @@ use winit::window::WindowBuilder;
 
 // Leaves clearance between the unit cubes throughout their rotations.
 const CUBE_CENTER_OFFSET: f32 = 1.0;
+// Point-light demo (spec 018): one static warm light, one cool light orbiting the scene so its
+// per-frame movement is visible. Both ranges are large enough to overlap and cover both cubes.
+const POINT_LIGHT_STATIC_RANGE: f32 = 4.0;
+const POINT_LIGHT_ORBIT_RANGE: f32 = 4.5;
+const POINT_LIGHT_ORBIT_RADIUS: f32 = 2.5;
+const POINT_LIGHT_ORBIT_HEIGHT: f32 = 1.0;
 // Free-fly camera tuning.
 const MOVE_SPEED: f32 = 3.0; // world units per second (WASD)
 const LOOK_SPEED: f32 = 1.5; // radians per second (arrow keys)
@@ -183,12 +189,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_texture(&checker([40, 80, 255, 255], [40, 255, 120, 255]), 2, 2)
         .expect("create texture B");
 
-    // A stationary sun. Faces toward it are bright; faces away fall to the ambient floor. Moving the
-    // camera (WASD + arrows) reveals the lit/unlit faces from every angle.
+    // A stationary sun, dimmed from its earlier full intensity so the point-light demo below (spec
+    // 018) reads clearly. Moving the camera (WASD + arrows) reveals the lit/unlit faces from every
+    // angle.
     renderer.set_directional_light(DirectionalLight {
         direction: Vec3::new(-0.4, -1.0, -0.6),
-        color: Vec3::new(1.0, 0.97, 0.9),
-        ambient: Vec3::new(0.12, 0.12, 0.15),
+        color: Vec3::new(0.35, 0.34, 0.32),
+        ambient: Vec3::new(0.05, 0.05, 0.07),
     })?;
 
     // The "simulation" side: a start time the cube's model matrix spins off of. This is what a game
@@ -276,6 +283,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Two copies of one mesh, independently transformed under a shared camera (spec 007).
                 let angle = start.elapsed().as_secs_f32();
+
+                // Point-light demo (spec 018): a static warm light plus a cool light orbiting the
+                // origin over time, reusing `angle` (the same elapsed-time source the cubes' spin
+                // animates off of) to drive its position each frame.
+                let point_lights = [
+                    PointLight {
+                        position: Vec3::new(-CUBE_CENTER_OFFSET, 1.5, 1.5),
+                        color: Vec3::new(1.0, 0.5, 0.2),
+                        range: POINT_LIGHT_STATIC_RANGE,
+                    },
+                    PointLight {
+                        position: Vec3::new(
+                            angle.cos() * POINT_LIGHT_ORBIT_RADIUS,
+                            POINT_LIGHT_ORBIT_HEIGHT,
+                            angle.sin() * POINT_LIGHT_ORBIT_RADIUS,
+                        ),
+                        color: Vec3::new(0.2, 0.6, 1.0),
+                        range: POINT_LIGHT_ORBIT_RANGE,
+                    },
+                ];
+                if let Err(e) = renderer.set_point_lights(&point_lights) {
+                    log::error!("Point light error: {e}");
+                    elwt.exit();
+                }
+
                 let models = [
                     translate(&Vec3::new(-CUBE_CENTER_OFFSET, 0.0, 0.0))
                         * rotate(&Vec3::new(0.0, 1.0, 0.0), angle),
