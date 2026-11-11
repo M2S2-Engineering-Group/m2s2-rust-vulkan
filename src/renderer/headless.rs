@@ -9,7 +9,7 @@ use crate::renderer::command::{self, ObjectCommand};
 use crate::renderer::depth::DepthResources;
 use crate::renderer::device::VulkanDevice;
 use crate::renderer::instance::VulkanInstance;
-use crate::renderer::light::{DirectionalLight, Light};
+use crate::renderer::light::{DirectionalLight, Light, PointLight};
 use crate::renderer::pipeline::{self, GraphicsPipeline};
 use crate::renderer::submission::{SubmitState, SubmitStep};
 use crate::renderer::texture::{self, Object, StoredTexture};
@@ -370,6 +370,8 @@ impl HeadlessRenderer {
         &mut self,
         objects: &[Object],
         camera: uniform::Camera,
+        directional_light: &DirectionalLight,
+        point_lights: &[PointLight],
     ) -> Result<Vec<u8>> {
         self.uniforms
             .as_mut()
@@ -378,7 +380,7 @@ impl HeadlessRenderer {
         self.light
             .as_mut()
             .expect("light present outside teardown")
-            .update(0, &DirectionalLight::default(), &[])?;
+            .update(0, directional_light, point_lights)?;
 
         let dev = &self.device.device;
 
@@ -957,10 +959,10 @@ mod tests {
             specular: SpecularMaterial::default(),
         }];
         let first = renderer
-            .render_frame(&objects, camera)
+            .render_frame(&objects, camera, &DirectionalLight::default(), &[])
             .expect("first render");
         let second = renderer
-            .render_frame(&objects, camera)
+            .render_frame(&objects, camera, &DirectionalLight::default(), &[])
             .expect("second render");
         assert_eq!(
             first, second,
@@ -993,7 +995,9 @@ mod tests {
             texture: None,
             specular: SpecularMaterial::default(),
         }];
-        let pixels = renderer.render_frame(&objects, camera).expect("render");
+        let pixels = renderer
+            .render_frame(&objects, camera, &DirectionalLight::default(), &[])
+            .expect("render");
 
         let golden_path = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),

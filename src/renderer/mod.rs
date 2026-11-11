@@ -24,7 +24,7 @@ mod upload;
 use crate::error::{Result, VulkanError};
 use crate::math::Mat4;
 use ash::vk;
-use light::{DirectionalLight, Light};
+use light::{validate_point_lights, DirectionalLight, Light, PointLight};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use std::sync::Arc;
 use submission::SubmitState;
@@ -95,6 +95,7 @@ pub struct VulkanRenderer {
     // frame. Like `uniforms`, freed via explicit `destroy` in `Drop` before the allocator.
     pub(crate) light: Option<Light>,
     pub(crate) directional_light: DirectionalLight,
+    pub(crate) point_lights: Vec<PointLight>,
     // Terminal when a fence wait could not confirm GPU completion: the renderer then leaks its whole
     // resource graph in `Drop` and every public operation returns `VulkanError::Terminal`.
     submit_state: SubmitState,
@@ -314,6 +315,7 @@ impl VulkanRenderer {
             texture_sets: Vec::new(),
             light: Some(light),
             directional_light: DirectionalLight::default(),
+            point_lights: Vec::new(),
             submit_state: SubmitState::NotSubmitted,
             allocator: ManuallyDrop::new(allocator),
             _window: window,
@@ -340,6 +342,16 @@ impl VulkanRenderer {
     /// preserving the previous light.
     pub fn set_directional_light(&mut self, light: DirectionalLight) -> Result<()> {
         self.directional_light.set_validated(light)
+    }
+
+    /// Set the point lights used for subsequent frames. Takes effect on the next `render_*` call,
+    /// which uploads them into that frame's light uniform.
+    /// Rejects a list longer than `MAX_POINT_LIGHTS` or containing an invalid light (see
+    /// `PointLight`) with a validation error, preserving the previous list.
+    pub fn set_point_lights(&mut self, lights: &[PointLight]) -> Result<()> {
+        validate_point_lights(lights)?;
+        self.point_lights = lights.to_vec();
+        Ok(())
     }
 
     /// Reject any operation once the renderer has entered its terminal (poisoned) state — a fence wait
@@ -473,6 +485,7 @@ impl VulkanRenderer {
             &camera_uniforms,
             self.light.as_mut().unwrap(),
             &self.directional_light,
+            &self.point_lights,
             objects,
             &self.texture_sets,
             self.white_set,

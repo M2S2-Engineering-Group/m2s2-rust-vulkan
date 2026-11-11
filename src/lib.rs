@@ -5,7 +5,7 @@ mod renderer;
 pub use error::{Result, VulkanError};
 pub use renderer::buffer::{Index, Vertex};
 pub use renderer::diagnostics::{Diagnostics, RenderStatus, RendererStats};
-pub use renderer::light::DirectionalLight;
+pub use renderer::light::{DirectionalLight, PointLight, MAX_POINT_LIGHTS};
 pub use renderer::text::TextDraw;
 pub use renderer::texture::{Object, SpecularMaterial, TextureId};
 pub use renderer::uniform::Camera;

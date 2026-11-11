@@ -3,7 +3,7 @@
 // rendering gap" section, since this is the one part of the render loop that can't be a
 // straight port of vulkan-tutorial.com's render-pass-based version.
 
-use super::light::{DirectionalLight, Light};
+use super::light::{DirectionalLight, Light, PointLight};
 use super::text::{TextRenderer, TextVertex};
 use super::texture::{resolve_texture_set, Object};
 use crate::error::{Result, VulkanError};
@@ -141,6 +141,7 @@ impl FrameContext {
         camera: &CameraUniforms,
         light: &mut Light,
         directional_light: &DirectionalLight,
+        point_lights: &[PointLight],
         objects: &[Object],
         texture_sets: &[vk::DescriptorSet],
         white_set: vk::DescriptorSet,
@@ -202,7 +203,7 @@ impl FrameContext {
         // so a later frame's wait would hang. Treat every post-reset failure as terminal.
         (|| -> Result<()> {
             uniforms.update(frame, camera)?;
-            light.update(frame, directional_light, &[])?;
+            light.update(frame, directional_light, point_lights)?;
             if let Some(text) = text.as_deref_mut() {
                 text.update(frame, text_vertices)?;
             }
