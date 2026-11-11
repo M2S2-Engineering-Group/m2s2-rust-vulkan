@@ -1024,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/headless_self_test.png"]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/headless_self_test.png (zero-point scenario)"]
     fn point_light_zero_matches_baseline() {
         use crate::math::Mat4;
         use crate::renderer::golden::assert_matches_golden;
@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/headless_self_test.png"]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/headless_self_test.png (beyond-range scenario)"]
     fn point_light_beyond_range_contributes_zero() {
         use crate::math::{Mat4, Vec3};
         use crate::renderer::golden::assert_matches_golden;
