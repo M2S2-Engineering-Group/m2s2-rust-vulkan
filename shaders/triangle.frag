@@ -25,8 +25,12 @@ layout(set = 2, binding = 0) uniform LightUniforms {
     vec3 direction;
     vec3 color;
     vec3 ambient;
-    uint pointCount;
-    PointLight points[MAX_POINT_LIGHTS];
+    // std140's automatic packing would place pointCount at offset 44 (the 4 leftover bytes after
+    // ambient's 12-byte vec3, since a bare uint only needs 4-byte alignment) and points at 48 —
+    // NOT the Rust-side SceneLightUniforms offsets of 48/64 (src/renderer/light.rs forces those via
+    // explicit padding fields). Explicit offsets here keep the two layouts in sync.
+    layout(offset = 48) uint pointCount;
+    layout(offset = 64) PointLight points[MAX_POINT_LIGHTS];
 } light;
 
 // Minimal camera block: only the world-space eye position is needed here (spec 013); the vertex

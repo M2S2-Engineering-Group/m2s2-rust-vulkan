@@ -205,6 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut diagnostics = Diagnostics::default();
     let mut show_diagnostics = true;
     let mut highlights_enabled = true;
+    let mut point_lights_enabled = true;
 
     // Free-fly camera state. Initial pose sits back from the scene looking at the origin; the initial
     // yaw/pitch are derived from that look direction so "reset" (R) returns here exactly.
@@ -257,6 +258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match code {
                             KeyCode::F3 => show_diagnostics = !show_diagnostics,
                             KeyCode::KeyH => highlights_enabled = !highlights_enabled,
+                            KeyCode::KeyP => point_lights_enabled = !point_lights_enabled,
                             KeyCode::KeyR => {
                                 cam_x = initial_pos[0];
                                 cam_y = initial_pos[1];
@@ -286,7 +288,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Point-light demo (spec 018): a static warm light plus a cool light orbiting the
                 // origin over time, reusing `angle` (the same elapsed-time source the cubes' spin
-                // animates off of) to drive its position each frame.
+                // animates off of) to drive its position each frame. Toggle with P to compare against
+                // the dimmed directional light alone.
                 let point_lights = [
                     PointLight {
                         position: Vec3::new(-CUBE_CENTER_OFFSET, 1.5, 1.5),
@@ -303,7 +306,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         range: POINT_LIGHT_ORBIT_RANGE,
                     },
                 ];
-                if let Err(e) = renderer.set_point_lights(&point_lights) {
+                let active_point_lights: &[PointLight] = if point_lights_enabled {
+                    &point_lights
+                } else {
+                    &[]
+                };
+                if let Err(e) = renderer.set_point_lights(active_point_lights) {
                     log::error!("Point light error: {e}");
                     elwt.exit();
                 }
