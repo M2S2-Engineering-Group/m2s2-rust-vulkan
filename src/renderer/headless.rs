@@ -1006,4 +1006,221 @@ mod tests {
         assert_matches_golden(&pixels, 64, 64, golden_path, 2).expect("pixel comparison");
         assert_eq!(renderer.validation_error_count(), 0);
     }
+
+    /// Shared fixed camera for the point-light scenario tests below: same eye/target/up and
+    /// projection as `self_test_scene_matches_golden_with_zero_validation_errors`, so every scenario
+    /// differs only in its point lights.
+    fn point_light_scenario_camera() -> uniform::Camera {
+        use crate::math::{to_radians, Vec3};
+        uniform::Camera {
+            view: crate::math::look_at(
+                &Vec3::new(2.0, 2.0, 2.0),
+                &Vec3::new(0.0, 0.0, 0.0),
+                &Vec3::new(0.0, 1.0, 0.0),
+            ),
+            proj: crate::math::perspective(to_radians(45.0), 1.0, 0.1, 10.0),
+            position: Vec3::new(2.0, 2.0, 2.0),
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/headless_self_test.png"]
+    fn point_light_zero_matches_baseline() {
+        use crate::math::Mat4;
+        use crate::renderer::golden::assert_matches_golden;
+        use crate::renderer::texture::SpecularMaterial;
+
+        let (vertices, indices) = lit_untextured_cube();
+        let mut renderer =
+            HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
+        let objects = [Object {
+            model: Mat4::IDENTITY,
+            texture: None,
+            specular: SpecularMaterial::default(),
+        }];
+        // Zero point lights: proves "zero points changes nothing" by reusing spec 013's existing
+        // baseline golden rather than a new one — this scene is otherwise byte-for-byte the same as
+        // `self_test_scene_matches_golden_with_zero_validation_errors`.
+        let pixels = renderer
+            .render_frame(
+                &objects,
+                point_light_scenario_camera(),
+                &DirectionalLight::default(),
+                &[],
+            )
+            .expect("render");
+
+        let golden_path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/golden/headless_self_test.png"
+        ));
+        assert_matches_golden(&pixels, 64, 64, golden_path, 2).expect("pixel comparison");
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/point_light_one_illuminates.png"]
+    fn point_light_one_illuminates() {
+        use crate::math::{Mat4, Vec3};
+        use crate::renderer::golden::assert_matches_golden;
+        use crate::renderer::texture::SpecularMaterial;
+
+        let (vertices, indices) = lit_untextured_cube();
+        let mut renderer =
+            HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
+        let objects = [Object {
+            model: Mat4::IDENTITY,
+            texture: None,
+            specular: SpecularMaterial::default(),
+        }];
+        let point_lights = [PointLight {
+            position: Vec3::new(1.5, 0.0, 0.0),
+            color: Vec3::new(1.0, 1.0, 1.0),
+            range: 5.0,
+        }];
+        let pixels = renderer
+            .render_frame(
+                &objects,
+                point_light_scenario_camera(),
+                &DirectionalLight::default(),
+                &point_lights,
+            )
+            .expect("render");
+
+        let golden_path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/golden/point_light_one_illuminates.png"
+        ));
+        assert_matches_golden(&pixels, 64, 64, golden_path, 2).expect("pixel comparison");
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/point_light_colors_add.png"]
+    fn point_light_colors_add() {
+        use crate::math::{Mat4, Vec3};
+        use crate::renderer::golden::assert_matches_golden;
+        use crate::renderer::texture::SpecularMaterial;
+
+        let (vertices, indices) = lit_untextured_cube();
+        let mut renderer =
+            HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
+        let objects = [Object {
+            model: Mat4::IDENTITY,
+            texture: None,
+            specular: SpecularMaterial::default(),
+        }];
+        // Two overlapping lights at the same position, pure red and pure blue: if contributions add
+        // linearly the lit region should read magenta-ish rather than either pure color.
+        let point_lights = [
+            PointLight {
+                position: Vec3::new(1.2, 0.0, 0.0),
+                color: Vec3::new(1.0, 0.0, 0.0),
+                range: 5.0,
+            },
+            PointLight {
+                position: Vec3::new(1.2, 0.0, 0.0),
+                color: Vec3::new(0.0, 0.0, 1.0),
+                range: 5.0,
+            },
+        ];
+        let pixels = renderer
+            .render_frame(
+                &objects,
+                point_light_scenario_camera(),
+                &DirectionalLight::default(),
+                &point_lights,
+            )
+            .expect("render");
+
+        let golden_path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/golden/point_light_colors_add.png"
+        ));
+        assert_matches_golden(&pixels, 64, 64, golden_path, 2).expect("pixel comparison");
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/headless_self_test.png"]
+    fn point_light_beyond_range_contributes_zero() {
+        use crate::math::{Mat4, Vec3};
+        use crate::renderer::golden::assert_matches_golden;
+        use crate::renderer::texture::SpecularMaterial;
+
+        let (vertices, indices) = lit_untextured_cube();
+        let mut renderer =
+            HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
+        let objects = [Object {
+            model: Mat4::IDENTITY,
+            texture: None,
+            specular: SpecularMaterial::default(),
+        }];
+        // Far outside its own range (distance from the unit cube is ~17 units, range is 1): should
+        // contribute nothing, so the frame must match the same zero-point baseline golden.
+        let point_lights = [PointLight {
+            position: Vec3::new(10.0, 10.0, 10.0),
+            color: Vec3::new(1.0, 1.0, 1.0),
+            range: 1.0,
+        }];
+        let pixels = renderer
+            .render_frame(
+                &objects,
+                point_light_scenario_camera(),
+                &DirectionalLight::default(),
+                &point_lights,
+            )
+            .expect("render");
+
+        let golden_path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/golden/headless_self_test.png"
+        ));
+        assert_matches_golden(&pixels, 64, 64, golden_path, 2).expect("pixel comparison");
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/point_light_eight_lights_and_ambient_does_not_scale.png"]
+    fn point_light_eight_lights_and_ambient_does_not_scale() {
+        use crate::math::{Mat4, Vec3};
+        use crate::renderer::golden::assert_matches_golden;
+        use crate::renderer::light::MAX_POINT_LIGHTS;
+        use crate::renderer::texture::SpecularMaterial;
+
+        let (vertices, indices) = lit_untextured_cube();
+        let mut renderer =
+            HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
+        let objects = [Object {
+            model: Mat4::IDENTITY,
+            texture: None,
+            specular: SpecularMaterial::default(),
+        }];
+        // All MAX_POINT_LIGHTS slots filled, dim and evenly spaced around the cube. If ambient were
+        // wrongly multiplied by point-light count, this scene would be visibly blown out relative to
+        // the other scenarios' shared ambient floor.
+        let point_lights: [PointLight; MAX_POINT_LIGHTS] = std::array::from_fn(|i| {
+            let angle = i as f32 * std::f32::consts::TAU / MAX_POINT_LIGHTS as f32;
+            PointLight {
+                position: Vec3::new(1.2 * angle.cos(), 0.3, 1.2 * angle.sin()),
+                color: Vec3::new(0.3, 0.3, 0.3),
+                range: 3.0,
+            }
+        });
+        let pixels = renderer
+            .render_frame(
+                &objects,
+                point_light_scenario_camera(),
+                &DirectionalLight::default(),
+                &point_lights,
+            )
+            .expect("render");
+
+        let golden_path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/golden/point_light_eight_lights_and_ambient_does_not_scale.png"
+        ));
+        assert_matches_golden(&pixels, 64, 64, golden_path, 2).expect("pixel comparison");
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
 }
