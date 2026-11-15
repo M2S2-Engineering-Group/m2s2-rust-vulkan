@@ -1,6 +1,6 @@
 # 018: Bounded point lighting
 
-**Status**: Draft for review; not implemented.
+**Status**: Implemented and verified (CPU gates pass; GPU acceptance confirmed by user).
 **Roadmap item**: Phase 2 basic lighting, point-light and multiple-light portion.
 **Dependencies**: Spec 011 directional light and validation, 012 resource safety, and 013's frame Camera
 and per-object SpecularMaterial. Mesh resources/instancing/mipmaps are independent design extensions.
@@ -183,4 +183,56 @@ None blocking. Everything above was a design-blocking decision; all are resolved
 
 ## Outcome
 
-Pending implementation.
+Implemented across four tasks plus one mid-flight plan correction. Task 1 (`68216f2`) added
+`PointLight { position, color, range }`, `MAX_POINT_LIGHTS = 8`, whole-list `validate_point_lights`
+(reject-all-or-nothing, never partially truncates), the `PointLightUniforms`/`SceneLightUniforms`
+std140 GPU layout types (320 bytes: directional fields unchanged at 0/16/32, `point_count` at 48,
+`points[8]` at 64), `Light::update`'s 3-argument signature, and a new `max_uniform_buffer_range`
+device-limit check mirroring `pipeline.rs`'s existing `validate_push_limit`. This task's first attempt
+was blocked and corrected mid-flight: the original plan text would have left the crate uncompilable
+across a commit boundary, violating both this project's "zero-warning at every commit" rule and its
+enforced pre-commit hook — the implementer correctly refused to bypass the hook, the plan was fixed to
+patch its own breaking call sites with a literal placeholder, and the corrected version landed clean.
+Task 2 (`6813d95`) wired `VulkanRenderer::set_point_lights` (validate-then-mutate, mirroring
+`set_directional_light` exactly) and threaded `point_lights` through `command::FrameContext::draw_frame`
+and `HeadlessRenderer::render_frame`. Task 3 (`4ddc346`, fixed by `2951280`) extracted a shared
+`blinnPhongSpecular` GLSL function the directional light and every point light call identically, and
+added the point-light loop (degeneracy guard before the falloff, `t = 1-d/range; attenuation = t*t`,
+zero at/beyond range). **A Critical bug was caught here and is worth recording**: the shader's first
+version declared its light UBO block with no explicit `layout(offset=...)` qualifiers; std140's
+automatic packing rule (a `vec3`'s base alignment is 16 but its real size is 12, so a following `uint`
+only needs 4-byte alignment and packs into the leftover space) placed `pointCount` at byte offset 44
+instead of the Rust side's actual 48 — `light.pointCount` would have always read a zeroed Rust-side
+padding field, silently making every point light contribute exactly zero on real hardware, while
+`glslc`/`spirv-val` both passed clean (neither tool can detect a host/shader layout mismatch). Fixed
+with explicit `layout(offset = 48)`/`layout(offset = 64)` qualifiers, matching this file's existing
+`CameraUniforms`/`MaterialPushConstants` precedent; independently re-verified by hand-trace twice (once
+at the task-review level, once again from scratch by the final whole-branch review). Task 4 (`46b9a2d`,
+fixed by `af5b750`) added five `#[ignore]`d golden-image GPU acceptance tests in `headless.rs`: zero
+points matches the pre-point-light baseline, one light illuminates, two differently-colored lights add,
+a light beyond its range contributes zero, and all eight lights fill without ambient scaling.
+
+Verified (CPU): 80 unit tests pass (up from 73 pre-spec), 10 `#[ignore]`d (GPU-dependent, up from 5),
+plus 2 example-crate tests and 3 doctests; all four quality gates clean. `glslc`/`spirv-val` clean on
+both recompiled shaders. An independent whole-branch review (model: Opus) found 0 Critical, 0
+Important issues in the final state (re-verifying the std140 offset fix from scratch rather than
+trusting the prior fix), and judged the `point_light_zero_matches_baseline`/
+`point_light_beyond_range_contributes_zero` tests' reuse of the pre-existing `headless_self_test.png`
+golden as legitimate (not a tautology) by confirming the shader refactor is algebraically identical to
+the pre-point-light directional path.
+
+**GPU acceptance: confirmed by the user.** All 10 previously-`#[ignore]`d tests pass on real Vulkan
+hardware with zero validation errors, including the 3 new golden images generated via
+`M2S2_UPDATE_GOLDEN=1` and committed to `testdata/golden/`.
+
+Two follow-ups were identified but ruled non-blocking for this branch: a pre-existing env-var race
+between two `golden.rs` tests under parallel `cargo test` (spec 019 infra, untouched by this diff,
+already known and pre-approved as a risk when spec 019 shipped); and a gap in this plan's own Review
+Focus section — no golden scenario exercises a point light positioned exactly at/near the degeneracy
+threshold, though the GLSL guard itself (`if (distSq <= MIN_SAFE_LENGTH_SQUARED) continue;`) was
+hand-verified correct by two independent reviewers. Both are recommended as separate tracked follow-ups,
+not fixes to this branch.
+
+Deferred per Non-goals: spot lights, point-light shadows, physically based inverse-square photometry,
+clustered/tiled/deferred lighting, a general light-type registry. The roadmap's point-light checkbox
+is now checked; multi-light/clustered rendering remains future work.

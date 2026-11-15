@@ -59,13 +59,13 @@ What separates "a triangle renders" from "a usable rendering engine" for simple 
 - [x] **Multiple draw calls**: independently transformed copies of one mesh through one pipeline — [spec 007](specs/007-multiple-objects-and-push-constants.md)
 - [ ] **Basic instancing**: deferred; 007 issues separate indexed draws
 - [x] **Text drawing and diagnostic overlay**: reusable text submissions; camera position, FPS/CPU frame interval, scene counts, device and swapchain state — [spec 008](specs/008-diagnostic-text-overlay.md). Shared sampled-R8 uploads are available; general textures remain below.
-- [ ] **Basic lighting**: Phong/Blinn-Phong (ambient + diffuse + specular), normals, one or more point/
-      directional lights. _Partially done_ — [spec 011](specs/011-directional-lighting.md) implemented
-      per-vertex normals and a single directional ("sun") light with per-pixel diffuse + ambient
-      shading (plus the cube example's free-fly camera), and
-      [spec 013](specs/013-specular-lighting.md) added the Blinn-Phong specular highlight (per-object
-      color/shininess, camera-dependent) on top of it. Ambient + diffuse + specular + normals are now
-      done; point/spot lights and multiple lights remain — box stays unchecked until those land.
+- [x] **Basic lighting**: Phong/Blinn-Phong (ambient + diffuse + specular), normals, one or more point/
+      directional lights. [Spec 011](specs/011-directional-lighting.md) implemented per-vertex normals
+      and a single directional ("sun") light with per-pixel diffuse + ambient shading (plus the cube
+      example's free-fly camera); [spec 013](specs/013-specular-lighting.md) added the Blinn-Phong
+      specular highlight (per-object color/shininess, camera-dependent); [spec 018](specs/018-point-lighting.md)
+      added up to eight positioned, colored, finite-range point lights sharing the same diffuse/specular
+      response. Spot lights remain a future spec (018's Non-goals).
 
 **Milestone**: a lit, textured 3D scene with a movable camera and more than one object.
 
