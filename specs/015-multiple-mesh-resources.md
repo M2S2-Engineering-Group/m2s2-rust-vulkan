@@ -79,16 +79,42 @@ require every uploaded vertex to be referenced or invent geometry repair.
 ## Vulkan objects and ownership
 
 An internal StoredMesh owns one device-local vertex buffer, one index buffer, and its index count.
-The renderer owns an append-only mesh store. Upload uses the shared staging/submission path and the
-pending-resource retention/error rules from 012; there is no second allocator or upload helper.
+The renderer owns an append-only mesh store. Upload reuses `Buffer::new_device_local` (the same
+helper `buffer.rs` already uses for the single construction-time mesh today); there is no second
+allocator or upload helper. Note: `Buffer::new_device_local`'s existing rollback (destroy the
+just-created buffer on any copy failure) does not currently distinguish an ordinary copy failure from
+a `VulkanError::Terminal` result (the GPU's completion could not be confirmed) — this is a pre-existing
+gap in that helper, not something this spec introduces or is required to fix, but `StoredMesh`'s own
+two-buffer upload inherits it exactly as the existing single-mesh path already does today.
 
-Publish a handle only after both uploads complete successfully. Failure of the second upload must
-release completed earlier resources when safe and retain any still-pending resources as 012 requires.
-A failed upload must leave all existing handles valid and publish no partial store entry.
+Publish a handle only after both buffer uploads complete successfully. If the vertex buffer succeeds
+and the index buffer fails, destroy the vertex buffer before returning the error (mirroring
+`StoredTexture::new`'s existing pattern of releasing an already-created sibling resource on a later
+step's failure). A failed upload must leave all existing handles valid and publish no partial store
+entry.
+
+**Validation/resolution must happen in a separate pass before any per-frame GPU work, not inline
+during command recording.** Today, `resolve_texture_set` runs deep inside `FrameContext::record`
+(after acquire, fence reset, and uniform/light updates) and tolerates an invalid handle by falling
+back to white — that's why it's safe to call so late. Once invalid handles are rejected instead,
+`render_objects_with_text` must validate every object's `MeshId` and `TextureId` against the
+renderer's stores in one pass, in the same place and the same style as its existing camera/specular
+validation loop (before checking `pending_resize`, before any acquire/fence/mapped-write), so an
+invalid handle fails the whole frame before any of that happens. By the time `record`/
+`emit_object_draws` runs, every object's handles are already known-valid; that stage resolves them
+again (reusing the same resolution function, not a second implementation) but does not need to
+return an error for an unresolvable handle, since validation already ruled that out.
 
 For each object, resolve StoredMesh, bind its vertex/index buffers, bind its texture, push model and
-material data from 013, then draw with that mesh's index count. Preserve submission order. Pipeline,
-vertex format, camera set 0, texture set 1, and directional light set 2 remain shared across meshes.
+material data from 013, then draw with that mesh's index count. This moves `cmd_bind_vertex_buffers`/
+`cmd_bind_index_buffer` from their current single per-frame call (outside the object loop) into the
+per-object path, and `emit_object_draws`/`ObjectCommand` gain a mesh-bind step and lose the single
+externally-supplied `index_count` in favor of each object's own resolved mesh's count. The existing
+`mixed_objects_bind_resolved_set_then_push_then_draw_in_order` test and its `record_objects` test
+helper hardcode one shared index count for every object; both need rewriting to exercise interleaved
+different-mesh objects, which is also exactly the Test plan's own "mesh A/B/A" requirement. Preserve
+submission order. Pipeline, vertex format, camera set 0, texture set 1, and directional light set 2
+remain shared across meshes.
 
 Resources remain owned until renderer teardown; there is no early-destruction queue in this spec.
 After completion, consume mesh buffers before allocator/device destruction. Buffer owners and native
@@ -129,8 +155,9 @@ and teardown under synchronization validation. Verify diagnostics against known 
   (`with_window`, `unsafe new`) lose their `vertices`/`indices` parameters; callers upload meshes via
   the new `create_mesh` and pass the returned `MeshId` through `Object`/`render_frame`. This is a
   breaking change to both constructors and to `render_frame`'s signature (gains a leading `mesh:
-  MeshId` parameter) — migrate `examples/{triangle,cube,window}.rs` in the same change, same pattern
-  as spec 013's `Camera` migration.
+  MeshId` parameter) — migrate `examples/triangle.rs` and `examples/cube.rs` in the same change, same
+  pattern as spec 013's `Camera` migration. `examples/window.rs` never constructs a `VulkanRenderer`
+  (it's a winit-only sanity check) and needs no change.
 - **TextureId strengthened to reject foreign/out-of-range handles:** accepted. `MeshId` gets strict
   rejection by necessity (there is no sensible silent default for a missing mesh — unlike a texture,
   which has an established white fallback). Extending the same rejection semantics to `TextureId`
@@ -149,7 +176,11 @@ and teardown under synchronization validation. Verify diagnostics against known 
   "checked monotonic owner identifier" requirement. The counter and a small shared newtype live in a
   new `src/renderer/handle.rs` module (no existing module owns a concept like this); both the new mesh
   store and `texture.rs`'s existing `TextureId` consume it, so the identity check has exactly one
-  implementation, not two. `Object` moves out of `texture.rs` into a new `src/renderer/scene.rs`
+  implementation, not two. `TextureId` changes shape from today's bare `TextureId(pub(super) usize)`
+  to carrying an owner id too — existing in-crate test code that constructs `TextureId(1)` directly
+  (`command.rs`'s and `texture.rs`'s own test modules) will not compile unchanged; those call sites
+  need a test-only helper that mints a validly-owned handle, not a bare tuple literal. `Object` moves
+  out of `texture.rs` into a new `src/renderer/scene.rs`
   (Object now aggregates `MeshId` from the new mesh module alongside `TextureId`/`SpecularMaterial`
   from `texture.rs` — no single existing module owns all three, and `MeshId` is Object's primary
   field, so a dedicated scene-data module is cleaner than bolting it onto either resource module).
