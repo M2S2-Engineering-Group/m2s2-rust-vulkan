@@ -2,8 +2,8 @@
 
 **Status**: Draft for review; not implemented.
 **Roadmap items**: Phase 3 resource handles; Phase 2 scenes containing different geometry.
-**Dependencies**: Spec 012's private ownership/cleanup contract and spec 013's proposed Camera and
-SpecularMaterial contracts. These interfaces are provisional until those drafts are reviewed.
+**Dependencies**: Spec 012's private ownership/cleanup contract and spec 013's Camera and
+SpecularMaterial contracts — both implemented and merged; no longer provisional.
 Spec 014 mipmaps are independent.
 
 ## Goal
@@ -20,7 +20,7 @@ mesh buffers, 32-bit indices, culling, materials as GPU resources, or automatic 
 
 ```rust
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct MeshId { /* private renderer identity and slot */ }
+pub struct MeshId { /* private renderer-owner identity and slot */ }
 
 pub struct Object {
     pub mesh: MeshId,
@@ -30,9 +30,12 @@ pub struct Object {
 }
 
 impl VulkanRenderer {
-    // Safety contract follows the final decision in 012; raw constructor shown here.
+    // Both existing constructors (spec 012) lose their vertices/indices parameters.
+    pub fn with_window<W: HasWindowHandle + HasDisplayHandle + 'static>(
+        window: Arc<W>, window_extent: (u32, u32),
+    ) -> Result<Self>;
     pub unsafe fn new(
-        display: RawDisplayHandle, window: RawWindowHandle, extent: (u32, u32),
+        display_handle: RawDisplayHandle, window_handle: RawWindowHandle, window_extent: (u32, u32),
     ) -> Result<Self>;
     pub fn create_mesh(&mut self, vertices: &[Vertex], indices: &[Index]) -> Result<MeshId>;
     pub fn render_frame(&mut self, mesh: MeshId, model: Mat4, camera: Camera) -> Result<()>;
@@ -98,10 +101,11 @@ older submissions. Retain the existing synchronous upload behavior; asynchronous
 of each submitted object's mesh index count, rather than objects.len() times one global count. Empty
 frames report zero; failed acquire retains prior submitted counts. Text does not count as scene work.
 
-Primary files: a private mesh owner/store module; Object's current namespace; mod.rs/lib.rs API and
-exports; command.rs resolution/binding/counting; examples and README. Move Object out of texture.rs
-only if needed for a clear shared scene-data namespace, updating exports rather than retaining duplicate
-types. No shader changes are inherently required beyond the adopted 013 contracts.
+Primary files: new `handle.rs` (shared owner-id newtype/counter) and `mesh.rs` (`MeshId`, `StoredMesh`,
+the mesh store) modules; new `scene.rs` for `Object` (moved out of `texture.rs`, which keeps
+`TextureId`/`SpecularMaterial`); `mod.rs`/`lib.rs` API and exports; `command.rs` resolution/binding/
+counting; examples and README updated for the constructor/`render_frame` signature changes. No shader
+changes are inherently required beyond the adopted 013 contracts.
 
 ## Test plan
 
@@ -119,12 +123,41 @@ GPU acceptance: a cube and a differently sized triangle/plane in one frame, repe
 handles, textured/untextured objects, text-only frames with no meshes, creation between frames, resize,
 and teardown under synchronization validation. Verify diagnostics against known differing index counts.
 
+## Resolved decisions (2026-11-15)
+
+- **Geometry-free construction + explicit MeshId:** accepted as proposed. Both existing constructors
+  (`with_window`, `unsafe new`) lose their `vertices`/`indices` parameters; callers upload meshes via
+  the new `create_mesh` and pass the returned `MeshId` through `Object`/`render_frame`. This is a
+  breaking change to both constructors and to `render_frame`'s signature (gains a leading `mesh:
+  MeshId` parameter) — migrate `examples/{triangle,cube,window}.rs` in the same change, same pattern
+  as spec 013's `Camera` migration.
+- **TextureId strengthened to reject foreign/out-of-range handles:** accepted. `MeshId` gets strict
+  rejection by necessity (there is no sensible silent default for a missing mesh — unlike a texture,
+  which has an established white fallback). Extending the same rejection semantics to `TextureId`
+  trades away its current silent-fallback-to-white behavior for consistency between the two handle
+  types and for this project's established philosophy of rejecting invalid input rather than silently
+  degrading it (same stance as `DirectionalLight`/`Camera`/`SpecularMaterial`/`PointLight` validation
+  in specs 011/013/018). This requires rewriting the existing
+  `resolve_none_and_out_of_range_fall_back_to_white` test in `texture.rs` — its name and assertions
+  describe the behavior this spec deliberately removes; `None` (not a stale/foreign `Some`) remains
+  the only way to request the white default.
+- **Owner identifier mechanism and module placement:** a process-wide monotonically increasing
+  counter (an `AtomicU64`, allocated once per `VulkanRenderer` construction) gives each renderer
+  instance a distinct owner id. `MeshId`/`TextureId` each carry `(owner: u64, slot: usize)`; resolving
+  either checks `owner` equality before indexing by `slot`, so a handle from one renderer instance can
+  never resolve against another's store even if the slot numbers collide — satisfying the spec's
+  "checked monotonic owner identifier" requirement. The counter and a small shared newtype live in a
+  new `src/renderer/handle.rs` module (no existing module owns a concept like this); both the new mesh
+  store and `texture.rs`'s existing `TextureId` consume it, so the identity check has exactly one
+  implementation, not two. `Object` moves out of `texture.rs` into a new `src/renderer/scene.rs`
+  (Object now aggregates `MeshId` from the new mesh module alongside `TextureId`/`SpecularMaterial`
+  from `texture.rs` — no single existing module owns all three, and `MeshId` is Object's primary
+  field, so a dedicated scene-data module is cleaner than bolting it onto either resource module).
+
 ## Open questions for review
 
-- Accept geometry-free renderer construction and explicit MeshId in Object/render_frame?
-- Accept strengthening TextureId to reject foreign/stale input in the same resource-identity change?
-- Confirm the private owner identifier and module placement after 012's public boundary is settled.
+None blocking. Everything above was a design-blocking decision; all are resolved.
 
 ## Outcome
 
-Pending design review and implementation. No resource or rendering code changes in this draft.
+Pending implementation.
