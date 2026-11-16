@@ -81,6 +81,13 @@ pub(crate) fn assert_matches_golden(
 mod tests {
     use super::*;
 
+    // `assert_matches_golden` reads the process-global `M2S2_UPDATE_GOLDEN` env var internally, and
+    // two tests below mutate it — under `cargo test`'s default parallel threading, one test's
+    // set_var/remove_var can be observed mid-flight by another test's concurrent call into
+    // `assert_matches_golden`, flipping which branch it takes. Every test in this module acquires
+    // this lock for its full body so no two can interleave on the shared env var.
+    static ENV_VAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn write_png(path: &std::path::Path, pixels: &[u8], width: u32, height: u32) {
         let file = std::fs::File::create(path).unwrap();
         let mut encoder = png::Encoder::new(file, width, height);
@@ -91,6 +98,7 @@ mod tests {
 
     #[test]
     fn identical_images_pass_at_zero_tolerance() {
+        let _guard = ENV_VAR_LOCK.lock().unwrap();
         let path = std::env::temp_dir().join("m2s2_golden_identical.png");
         let pixels = vec![10u8, 20, 30, 255, 40, 50, 60, 255]; // 2x1 RGBA
         write_png(&path, &pixels, 2, 1);
@@ -100,6 +108,7 @@ mod tests {
 
     #[test]
     fn out_of_tolerance_pixel_fails_with_coordinates() {
+        let _guard = ENV_VAR_LOCK.lock().unwrap();
         let path = std::env::temp_dir().join("m2s2_golden_mismatch.png");
         let golden = vec![10u8, 20, 30, 255, 40, 50, 60, 255];
         write_png(&path, &golden, 2, 1);
@@ -115,6 +124,7 @@ mod tests {
 
     #[test]
     fn within_tolerance_difference_passes() {
+        let _guard = ENV_VAR_LOCK.lock().unwrap();
         let path = std::env::temp_dir().join("m2s2_golden_tolerance.png");
         let golden = vec![10u8, 20, 30, 255];
         write_png(&path, &golden, 1, 1);
@@ -125,6 +135,7 @@ mod tests {
 
     #[test]
     fn missing_golden_without_update_flag_fails_clearly() {
+        let _guard = ENV_VAR_LOCK.lock().unwrap();
         let path = std::env::temp_dir().join("m2s2_golden_missing_no_update.png");
         let _ = std::fs::remove_file(&path);
         std::env::remove_var("M2S2_UPDATE_GOLDEN");
@@ -137,6 +148,7 @@ mod tests {
 
     #[test]
     fn missing_golden_with_update_flag_writes_one() {
+        let _guard = ENV_VAR_LOCK.lock().unwrap();
         let path = std::env::temp_dir().join("m2s2_golden_missing_with_update.png");
         let _ = std::fs::remove_file(&path);
         std::env::set_var("M2S2_UPDATE_GOLDEN", "1");
@@ -149,6 +161,7 @@ mod tests {
 
     #[test]
     fn dimension_mismatch_fails_clearly_not_panics() {
+        let _guard = ENV_VAR_LOCK.lock().unwrap();
         let path = std::env::temp_dir().join("m2s2_golden_dimension_mismatch.png");
         write_png(&path, &[0u8, 0, 0, 255, 0, 0, 0, 255], 2, 1);
         let err = assert_matches_golden(&[0u8, 0, 0, 255], 1, 1, &path, 2).unwrap_err();
@@ -161,6 +174,7 @@ mod tests {
 
     #[test]
     fn corrupt_golden_without_update_flag_mentions_env_var() {
+        let _guard = ENV_VAR_LOCK.lock().unwrap();
         let path = std::env::temp_dir().join("m2s2_golden_corrupt.png");
         // Write garbage bytes instead of a valid PNG
         std::fs::write(&path, b"not a valid png file").unwrap();
