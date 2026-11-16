@@ -206,3 +206,11 @@ dynamic rendering is core: the `VK_KHR_dynamic_rendering` extension and its pre-
 the `get_physical_device_properties2` instance extension, and both the properties2 and
 dynamic-rendering loaders are gone; device selection now gates on a `>= 1.3` version check and
 `cmd_begin/end_rendering` are core `ash::Device` calls.
+
+
+Spec 015 is implemented and verified. Windowed constructors take no geometry; call `create_mesh` and
+reference the returned `MeshId` in `Object` or `render_frame(mesh, model, camera)`. All mesh/texture
+handles carry renderer identity, and foreign/out-of-range handles reject the full frame before GPU
+work. `scene.rs` owns Object; `mesh.rs` owns mesh validation/upload; `handle.rs` shares owner/slot checks.
+Headless fixtures support zero/multiple meshes and text-only frames. The new multi-mesh goldens and
+acceptance outcomes are documented in spec 015 and `testdata/golden/README.md`.

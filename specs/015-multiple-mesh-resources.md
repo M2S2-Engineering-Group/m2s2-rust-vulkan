@@ -1,6 +1,6 @@
 # 015: Multiple mesh resources
 
-**Status**: Draft for review; not implemented.
+**Status**: Implemented and verified (CPU gates, headless GPU suite, and windowed smoke test pass).
 **Roadmap items**: Phase 3 resource handles; Phase 2 scenes containing different geometry.
 **Dependencies**: Spec 012's private ownership/cleanup contract and spec 013's Camera and
 SpecularMaterial contracts — both implemented and merged; no longer provisional.
@@ -191,4 +191,27 @@ None blocking. Everything above was a design-blocking decision; all are resolved
 
 ## Outcome
 
-Pending implementation.
+Implemented geometry-free windowed construction, explicit create_mesh/MeshId, per-object mesh
+binding/counting, and strict renderer-owned mesh/texture resolution. Object now lives in scene.rs.
+The original headless constructor remains a convenience fixture; new_empty/create_mesh support real
+zero/multiple-mesh tests and render_frame_with_text exercises the shared text renderer. Invalid handles
+are rejected before mapped writes/recording, leaving the next valid frame usable. Removed the temporary
+MeshId::UNASSIGNED placeholder. Owner allocation now fails closed on u64 exhaustion without wrapping.
+
+Added four opt-in GPU tests: different meshes, repeated handles, zero-mesh text, and invalid
+handle/upload rejection followed by a valid render. Generated only three new multi_mesh_*.png files;
+all previous baselines were left unchanged. The different-mesh/repeated-handle tests additionally
+compare actual output with deliberately different draw inputs, so baseline generation cannot silently
+accept the same geometry for every handle. Visually inspected all three new images.
+
+Verification on the local Vulkan driver: 94 CPU library tests, 2 example tests, and doctests pass;
+all 15 ignored GPU tests pass under synchronization validation without baseline-update mode. Existing
+10 headless GPU tests also passed before new baseline generation. Formatting, warnings-denied Clippy,
+and all-target build pass. A temporary seven-second windowed probe verified different mesh counts
+(36 + 3 = 39 submitted indices, 2 scene draws), two resizes, minimize/restore, mesh creation between
+frames, and normal shutdown with no emitted validation errors. The temporary source was removed.
+
+Headless teardown retains its owner graph on terminal waits; text/upload entry points refuse reuse.
+The pre-existing upload-helper terminal-cleanup limitation described above remains deferred under 012;
+this change does not claim injected driver-failure coverage. Cross-platform runtime acceptance remains
+future work. No mesh unloading, slot reuse, or GPU instancing is introduced.

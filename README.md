@@ -21,10 +21,12 @@ src/
     ├── swapchain.rs    # Swapchain management
     ├── pipeline.rs     # Dynamic-rendering graphics pipeline
     ├── buffer.rs       # Staged vertex/index buffers
+    ├── mesh.rs         # Renderer-owned meshes and MeshId validation
+    ├── scene.rs        # Per-object mesh, transform, texture, and material
     ├── command.rs      # Command recording and frame synchronization
     ├── text.rs         # Reusable bitmap text layout and GPU drawing
     ├── diagnostics.rs  # CPU frame timing and diagnostic formatting
-    ├── image.rs        # Sampled R8 image upload
+    ├── image.rs        # Sampled R8/RGBA8 image upload
     └── upload.rs       # Shared one-time upload submission
 
 examples/
@@ -67,6 +69,31 @@ See [REVIEW_NOTES.md](REVIEW_NOTES.md) for correctness fixes and verification li
 [spec 007](specs/007-multiple-objects-and-push-constants.md) for multiple-object rendering, and [spec 008](specs/008-diagnostic-text-overlay.md)
 for reusable text drawing and the diagnostic overlay. The cube example shows diagnostics by default;
 press **F3** to hide/show them.
+
+## Mesh resources
+
+Construct with `VulkanRenderer::with_window(Arc::clone(&window), extent)`; the renderer starts with no
+meshes. Upload each vertex/index pair with `create_mesh`, then put its `MeshId` in each `Object`.
+Mesh and texture handles belong to the renderer that created them. Invalid or foreign handles reject
+the whole frame before GPU work; `texture: None` explicitly selects the white default.
+
+```rust,ignore
+let mesh = renderer.create_mesh(&vertices, &indices)?;
+let objects = [Object {
+    mesh,
+    model: Mat4::IDENTITY,
+    texture: None,
+    specular: SpecularMaterial::default(),
+}];
+renderer.render_objects(&objects, camera)?;
+// Single-object convenience path:
+renderer.render_frame(mesh, Mat4::IDENTITY, camera)?;
+```
+
+Upload different meshes through the same renderer, or reuse a handle across many objects. Meshes stay
+alive until renderer teardown. Empty object slices can still clear/present and draw text without any
+mesh upload. The raw-handle `unsafe new` constructor also takes only handles and extent; geometry is
+uploaded afterward. See [spec 015](specs/015-multiple-mesh-resources.md) for validation and ownership.
 
 ## Drawing text
 

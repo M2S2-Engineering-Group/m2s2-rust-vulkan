@@ -75,19 +75,14 @@ safe `with_window`/`unsafe new` constructors, bounded exclusive mapped writes, o
 destruction, and a terminal-failure leak policy. Two scoped items deferred (ManuallyDrop→Option for the
 six core owners; upload staging leak-on-terminal) — see the spec Outcome.
 
-Proposed follow-ups after cleanup: [draft spec 013](specs/013-specular-lighting.md) adds per-object
-Blinn–Phong highlights and explicit frame camera data; [draft spec 014](specs/014-texture-mipmaps.md)
-adds optional generated texture mip chains. Both are awaiting review; neither is implemented.
+Completed follow-ups: [013](specs/013-specular-lighting.md) specular lighting,
+[018](specs/018-point-lighting.md) point lighting, [019](specs/019-headless-rendering-and-golden-image-tests.md)
+headless/golden tests, and [015](specs/015-multiple-mesh-resources.md) multiple mesh resources.
 
-Additional drafts (all unimplemented):
-
-- [015: Multiple mesh resources](specs/015-multiple-mesh-resources.md) — typed mesh handles and renderer identity; builds on 012/013.
-- [016: GPU instancing](specs/016-gpu-instancing.md) — consecutive mesh/texture batches; builds on 015 and per-object material data.
-- [017: Directional shadow mapping](specs/017-directional-shadow-mapping.md) — explicit two-pass shadows; pass interfaces provisional, with 016 reused when present.
-- [018: Point lighting](specs/018-point-lighting.md) — bounded positioned lights; builds on 011–013 and can precede shadow implementation.
-
-Numbering identifies documents, not a mandatory execution sequence. Resolve ownership contracts first;
-point lighting and mipmaps can proceed independently of the mesh/instancing/shadow sequence.
+Remaining drafts: [014](specs/014-texture-mipmaps.md) texture mipmaps,
+[016](specs/016-gpu-instancing.md) GPU instancing, and
+[017](specs/017-directional-shadow-mapping.md) directional shadows. Numbering identifies documents,
+not a mandatory execution sequence; mipmaps can proceed independently of instancing/shadows.
 
 ## Phase 3: Scene & asset infrastructure
 
@@ -96,9 +91,9 @@ section — no window/event-loop ownership), scene graph and asset ownership nee
 library owns vs. what it hands back to the caller (the tutorial project and the C++ port each want scene
 management their own way).
 
-- [ ] **Resource handles**: opaque handles for GPU resources (buffers, images, pipelines) instead of
-      exposing raw `vk::Buffer`/`vk::Image` to callers — this is the point where "library" vs. "app code"
-      boundaries get decided
+- [x] **Mesh/texture resource handles**: renderer-owned resources with typed handles and foreign-handle
+      rejection — [spec 015](specs/015-multiple-mesh-resources.md). Public buffer/image/pipeline handles
+      remain outside the high-level API; unloading and slot reuse are deferred.
 - [ ] **Model loading**: glTF (preferred — PBR-friendly material model) and/or OBJ
 - [ ] **Material system**: decouple "what a shader needs" from "what an asset provides"
 - [ ] **Scene graph**: hierarchical transforms — likely belongs to the *caller*, not this library, given the

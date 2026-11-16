@@ -618,3 +618,13 @@ the full pre-existing `#[ignore]`d suite (every test from specs 018/019) to conf
 regressed. Only after the user confirms this should the golden PNGs be committed and spec 015's
 Outcome section + `ROADMAP.md` be updated to reflect verified (not just implemented) status — the
 same two-step handoff pattern specs 018/019 established.
+
+
+## Completion follow-up
+
+Task 5 is implemented and GPU-verified locally. The earlier no-GPU handoff assumption no longer
+applies: three new baseline PNGs were generated and visually inspected, then all 15 ignored GPU tests
+passed in comparison mode. Existing baselines were not regenerated. The headless fixture was extended
+with real empty construction, additional mesh upload, text rendering, and early handle validation;
+no placeholder test was used. A windowed probe verified counters, resize/minimize, upload between
+frames, and shutdown. See spec 015 Outcome for final coverage and retained limitations.
