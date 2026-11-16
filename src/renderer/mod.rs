@@ -13,6 +13,7 @@ pub(crate) mod headless;
 mod image;
 pub mod instance;
 pub mod light;
+mod mesh;
 pub(crate) mod per_frame_uniform;
 pub mod pipeline;
 pub(crate) mod submission;
