@@ -4,8 +4,9 @@
 // straight port of vulkan-tutorial.com's render-pass-based version.
 
 use super::light::{DirectionalLight, Light, PointLight};
+use super::scene::Object;
 use super::text::{TextRenderer, TextVertex};
-use super::texture::{resolve_texture_set, Object};
+use super::texture::resolve_texture_set;
 use crate::error::{Result, VulkanError};
 use crate::renderer::buffer::Buffer;
 use crate::renderer::depth::DepthResources;
@@ -143,6 +144,7 @@ impl FrameContext {
         directional_light: &DirectionalLight,
         point_lights: &[PointLight],
         objects: &[Object],
+        owner: u64,
         texture_sets: &[vk::DescriptorSet],
         white_set: vk::DescriptorSet,
         mut text: Option<&mut TextRenderer>,
@@ -226,6 +228,7 @@ impl FrameContext {
             vertex_buffer,
             index_buffer,
             objects,
+            owner,
             texture_sets,
             white_set,
             text.as_deref(),
@@ -302,6 +305,7 @@ impl FrameContext {
         vertex_buffer: &Buffer,
         index_buffer: &Buffer,
         objects: &[Object],
+        owner: u64,
         texture_sets: &[vk::DescriptorSet],
         white_set: vk::DescriptorSet,
         text: Option<&TextRenderer>,
@@ -440,6 +444,7 @@ impl FrameContext {
             emit_object_draws(
                 objects,
                 index_buffer.len(),
+                owner,
                 texture_sets,
                 white_set,
                 |command| match command {
@@ -508,12 +513,15 @@ pub(super) enum ObjectCommand<'a> {
 pub(super) fn emit_object_draws(
     objects: &[Object],
     index_count: u32,
+    owner: u64,
     texture_sets: &[vk::DescriptorSet],
     white_set: vk::DescriptorSet,
     mut emit: impl FnMut(ObjectCommand<'_>),
 ) {
     for object in objects {
-        let set = resolve_texture_set(object.texture, texture_sets, white_set);
+        let set = resolve_texture_set(object.texture, owner, texture_sets, white_set).expect(
+            "object handles are not yet validated before this point — this placeholder is replaced by Task 4's up-front validation pass",
+        );
         emit(ObjectCommand::BindTexture(set));
         let constants = ModelPushConstants {
             model: object.model,
@@ -594,11 +602,12 @@ mod tests {
 
     fn record_objects(
         objects: &[Object],
+        owner: u64,
         sets: &[vk::DescriptorSet],
         white: vk::DescriptorSet,
     ) -> Vec<RecordedCommand> {
         let mut commands = Vec::new();
-        emit_object_draws(objects, 36, sets, white, |command| {
+        emit_object_draws(objects, 36, owner, sets, white, |command| {
             commands.push(match command {
                 ObjectCommand::BindTexture(s) => RecordedCommand::Bind(s),
                 ObjectCommand::PushModel(bytes) => RecordedCommand::Push(bytes.to_vec()),
@@ -610,13 +619,15 @@ mod tests {
 
     #[test]
     fn empty_objects_emit_no_commands() {
-        assert!(record_objects(&[], &[set(0xA0)], set(0x10)).is_empty());
+        let owner = crate::renderer::handle::next_owner_id();
+        assert!(record_objects(&[], owner, &[set(0xA0)], set(0x10)).is_empty());
     }
 
     #[test]
     fn mixed_objects_bind_resolved_set_then_push_then_draw_in_order() {
         let white = set(0x10);
         let sets = [set(0xA0), set(0xB0)];
+        let owner = crate::renderer::handle::next_owner_id();
         let m0 = crate::math::translate(&crate::math::Vec3::new(1.0, 0.0, 0.0));
         let m1 = crate::math::rotate(&crate::math::Vec3::new(0.0, 1.0, 0.0), 0.5);
         let specular0 = SpecularMaterial::default();
@@ -626,18 +637,20 @@ mod tests {
         };
         let objects = [
             Object {
+                mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
                 model: m0,
                 texture: None,
                 specular: specular0,
             },
             Object {
+                mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
                 model: m1,
-                texture: Some(crate::renderer::texture::TextureId(1)),
+                texture: Some(crate::renderer::texture::TextureId::new(owner, 1)),
                 specular: specular1,
             },
         ];
         assert_eq!(
-            record_objects(&objects, &sets, white),
+            record_objects(&objects, owner, &sets, white),
             vec![
                 RecordedCommand::Bind(white),
                 RecordedCommand::Push(

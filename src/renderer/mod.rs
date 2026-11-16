@@ -13,9 +13,10 @@ pub(crate) mod headless;
 mod image;
 pub mod instance;
 pub mod light;
-mod mesh;
+pub mod mesh;
 pub(crate) mod per_frame_uniform;
 pub mod pipeline;
+pub mod scene;
 pub(crate) mod submission;
 pub mod swapchain;
 pub mod text;
@@ -36,8 +37,9 @@ use submission::SubmitState;
 /// implemented for anything exposing both handle traits (e.g. a winit `Window`).
 pub(crate) trait WindowOwner: HasWindowHandle + HasDisplayHandle {}
 impl<T: HasWindowHandle + HasDisplayHandle> WindowOwner for T {}
+use scene::Object;
 use std::mem::ManuallyDrop;
-use texture::{validate_specular, Object, SpecularMaterial, StoredTexture};
+use texture::{validate_specular, SpecularMaterial, StoredTexture};
 
 /// The Vulkan renderer. Owns the whole GPU resource graph; its fields and low-level owners are
 /// private. Construct it with [`VulkanRenderer::with_window`] (safe) or [`VulkanRenderer::new`]
@@ -93,6 +95,9 @@ pub struct VulkanRenderer {
     pub(crate) white_set: vk::DescriptorSet,
     pub(crate) textures: Vec<StoredTexture>,
     pub(crate) texture_sets: Vec<vk::DescriptorSet>,
+    // This renderer instance's owner id (see `handle.rs`), stamped into every `TextureId` it hands
+    // out so a handle from a different renderer is rejected rather than silently resolved.
+    owner_id: u64,
     // Per-frame light uniform (descriptor set 2) and the current directional light it uploads each
     // frame. Like `uniforms`, freed via explicit `destroy` in `Drop` before the allocator.
     pub(crate) light: Option<Light>,
@@ -315,6 +320,7 @@ impl VulkanRenderer {
             white_set,
             textures: Vec::new(),
             texture_sets: Vec::new(),
+            owner_id: handle::next_owner_id(),
             light: Some(light),
             directional_light: DirectionalLight::default(),
             point_lights: Vec::new(),
@@ -385,6 +391,7 @@ impl VulkanRenderer {
     pub fn render_frame(&mut self, model: Mat4, camera: uniform::Camera) -> Result<()> {
         self.render_objects(
             &[Object {
+                mesh: mesh::MeshId::UNASSIGNED,
                 model,
                 texture: None,
                 specular: SpecularMaterial::default(),
@@ -489,6 +496,7 @@ impl VulkanRenderer {
             &self.directional_light,
             &self.point_lights,
             objects,
+            self.owner_id,
             &self.texture_sets,
             self.white_set,
             self.text_renderer.as_mut(),
@@ -557,7 +565,7 @@ impl VulkanRenderer {
             height,
         );
         let stored = self.guard(stored)?;
-        let id = texture::TextureId(self.textures.len());
+        let id = texture::TextureId::new(self.owner_id, self.textures.len());
         self.texture_sets.push(stored.set);
         self.textures.push(stored);
         Ok(id)

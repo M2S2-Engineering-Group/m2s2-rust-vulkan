@@ -11,8 +11,9 @@ use crate::renderer::device::VulkanDevice;
 use crate::renderer::instance::VulkanInstance;
 use crate::renderer::light::{DirectionalLight, Light, PointLight};
 use crate::renderer::pipeline::{self, GraphicsPipeline};
+use crate::renderer::scene::Object;
 use crate::renderer::submission::{SubmitState, SubmitStep};
-use crate::renderer::texture::{self, Object, StoredTexture};
+use crate::renderer::texture::{self, StoredTexture};
 use crate::renderer::uniform::{self, Uniforms};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
@@ -570,7 +571,9 @@ impl HeadlessRenderer {
                 .as_ref()
                 .expect("white texture present outside teardown")
                 .set;
-            command::emit_object_draws(objects, index_buffer.len(), &[], white_set, |command| {
+            // `owner` is irrelevant here: every object below uses `texture: None`, which resolves to
+            // `white_set` without consulting it.
+            command::emit_object_draws(objects, index_buffer.len(), 0, &[], white_set, |command| {
                 match command {
                     ObjectCommand::BindTexture(set) => dev.cmd_bind_descriptor_sets(
                         cmd,
@@ -954,6 +957,7 @@ mod tests {
             position: Vec3::new(2.0, 2.0, 2.0),
         };
         let objects = [Object {
+            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),
@@ -991,6 +995,7 @@ mod tests {
             position: Vec3::new(2.0, 2.0, 2.0),
         };
         let objects = [Object {
+            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),
@@ -1034,6 +1039,7 @@ mod tests {
         let mut renderer =
             HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
         let objects = [Object {
+            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),
@@ -1069,6 +1075,7 @@ mod tests {
         let mut renderer =
             HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
         let objects = [Object {
+            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),
@@ -1106,6 +1113,7 @@ mod tests {
         let mut renderer =
             HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
         let objects = [Object {
+            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),
@@ -1152,6 +1160,7 @@ mod tests {
         let mut renderer =
             HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
         let objects = [Object {
+            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),
@@ -1192,6 +1201,7 @@ mod tests {
         let mut renderer =
             HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
         let objects = [Object {
+            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),

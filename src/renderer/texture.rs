@@ -1,15 +1,29 @@
 //! Caller-facing texture handles and the renderer-owned texture resource.
-use super::{allocator::Allocator, device::VulkanDevice, image::SampledImage};
+use super::{allocator::Allocator, device::VulkanDevice, handle, image::SampledImage};
 use crate::{
     error::{Result, VulkanError},
-    math::{Mat4, Vec3},
+    math::Vec3,
 };
 use ash::vk;
 
-/// Opaque handle to a renderer-owned texture (an index into the renderer's texture store).
-/// `Copy`; valid for the lifetime of the renderer that produced it.
+/// Opaque handle to a renderer-owned texture: an `(owner, slot)` pair identifying one entry in the
+/// renderer's texture store. `Copy`; valid for the lifetime of the renderer that produced it. Fields
+/// are private to this module (mirrors `mesh::MeshId`) — nothing outside `texture.rs` can construct
+/// a `TextureId` directly.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct TextureId(pub(super) usize);
+pub struct TextureId {
+    owner: u64,
+    slot: usize,
+}
+
+impl TextureId {
+    /// Construct a `TextureId` for a renderer's `owner` id and a slot in its texture store. The sole
+    /// constructor — called from `mod.rs`'s `create_texture` (the production path) and from this
+    /// module's own tests.
+    pub(super) fn new(owner: u64, slot: usize) -> Self {
+        Self { owner, slot }
+    }
+}
 
 /// Per-object Blinn-Phong specular parameters (spec 013). `color` tints the highlight; `shininess`
 /// controls its tightness (higher = smaller, sharper highlight).
@@ -45,14 +59,6 @@ pub(crate) fn validate_specular(material: &SpecularMaterial) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-/// One drawn copy of the uploaded mesh. `texture: None` samples the renderer's 1x1 white default,
-/// so an untextured object reproduces the pre-texture look (`white * vertexColor == vertexColor`).
-pub struct Object {
-    pub model: Mat4,
-    pub texture: Option<TextureId>,
-    pub specular: SpecularMaterial,
 }
 
 const TEXTURE_BINDING: u32 = 0;
@@ -153,17 +159,26 @@ impl StoredTexture {
     }
 }
 
-/// The descriptor set bound at set 1 for an object: the stored texture's set, or `white` when the
-/// object has no texture or references an out-of-range handle (a stale/foreign id falls back to
-/// white rather than indexing out of bounds).
+/// The descriptor set bound at set 1 for an object: `white` when the object has no texture
+/// (infallible — there is always a sensible default), or the stored texture's set when `texture` is
+/// `Some` and resolves against `my_owner`/`texture_sets` (the identity check shared with
+/// `mesh::resolve_mesh`, via `handle::resolve_handle`). Unlike `None`, a stale/foreign
+/// `Some(TextureId)` — wrong owner or an out-of-range slot — is rejected with an error rather than
+/// silently falling back to white.
 pub(super) fn resolve_texture_set(
     texture: Option<TextureId>,
+    my_owner: u64,
     texture_sets: &[vk::DescriptorSet],
     white: vk::DescriptorSet,
-) -> vk::DescriptorSet {
+) -> Result<vk::DescriptorSet> {
     match texture {
-        None => white,
-        Some(TextureId(index)) => texture_sets.get(index).copied().unwrap_or(white),
+        None => Ok(white),
+        Some(id) => match handle::resolve_handle(id.owner, id.slot, my_owner, texture_sets.len()) {
+            Some(slot) => Ok(texture_sets[slot]),
+            None => Err(VulkanError::ValidationError(
+                "texture id does not belong to this renderer or is out of range".into(),
+            )),
+        },
     }
 }
 
@@ -209,20 +224,32 @@ mod tests {
     }
 
     #[test]
-    fn resolve_none_and_out_of_range_fall_back_to_white() {
+    fn resolve_texture_set_rejects_foreign_or_out_of_range_handles() {
         let white = set(0x10);
         let sets = [set(0xa0), set(0xb0)];
-        assert_eq!(resolve_texture_set(None, &sets, white), white);
+        let owner = handle::next_owner_id();
+
+        // None always resolves to white, infallibly.
         assert_eq!(
-            resolve_texture_set(Some(TextureId(0)), &sets, white),
+            resolve_texture_set(None, owner, &sets, white).unwrap(),
+            white
+        );
+
+        // A valid, correctly-owned Some(TextureId) resolves to the matching set.
+        assert_eq!(
+            resolve_texture_set(Some(TextureId::new(owner, 0)), owner, &sets, white).unwrap(),
             sets[0]
         );
         assert_eq!(
-            resolve_texture_set(Some(TextureId(1)), &sets, white),
+            resolve_texture_set(Some(TextureId::new(owner, 1)), owner, &sets, white).unwrap(),
             sets[1]
         );
-        // out of range -> white, not a panic
-        assert_eq!(resolve_texture_set(Some(TextureId(2)), &sets, white), white);
-        assert_eq!(resolve_texture_set(Some(TextureId(0)), &[], white), white);
+
+        // An out-of-range slot with the correct owner is rejected.
+        assert!(resolve_texture_set(Some(TextureId::new(owner, 2)), owner, &sets, white).is_err());
+
+        // A mismatched owner with an otherwise in-range slot is rejected.
+        let other = handle::next_owner_id();
+        assert!(resolve_texture_set(Some(TextureId::new(owner, 0)), other, &sets, white).is_err());
     }
 }

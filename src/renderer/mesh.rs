@@ -25,6 +25,23 @@ pub struct MeshId {
     slot: usize,
 }
 
+impl MeshId {
+    /// A deliberately-invalid placeholder: `owner: 0` is never allocated by
+    /// `handle::next_owner_id` (its first real id is 1), so this can never resolve against any
+    /// real renderer's store. Exists only to keep `Object` literals compiling at task boundaries
+    /// mid-migration (Tasks 3-5 of spec 015's plan) before a real `MeshId` from `create_mesh` is
+    /// available at each call site — every production/example/test call site that still
+    /// constructs this past Task 5 is a bug, not a valid use.
+    ///
+    /// **Visibility note:** `pub`, not `pub(crate)` — `examples/cube.rs` compiles as a separate
+    /// binary crate (examples never get `pub(crate)` access to the library crate, regardless of
+    /// re-export path), and Task 3/4 need it there too. This is a temporary, intentional crack in
+    /// an otherwise fully-private handle type; Task 4 re-tightens it to `pub(crate)` once
+    /// `cube.rs` no longer references it (its last external use).
+    #[allow(dead_code)]
+    pub const UNASSIGNED: MeshId = MeshId { owner: 0, slot: 0 };
+}
+
 /// Checked `usize -> u32` conversion for a vertex/index count. GPU buffer lengths (`Buffer::len`)
 /// and draw-call counts are `u32`; this rejects a count that wouldn't survive that conversion
 /// instead of silently truncating it.

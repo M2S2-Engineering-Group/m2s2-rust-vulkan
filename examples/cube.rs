@@ -2,7 +2,7 @@ use m2s2_rust_vulkan::math::{
     look_at, perspective, rotate, to_radians, translate, Vec2, Vec3, Vec4,
 };
 use m2s2_rust_vulkan::{
-    init_logging, Camera, Diagnostics, DirectionalLight, Index, Object, PointLight,
+    init_logging, Camera, Diagnostics, DirectionalLight, Index, MeshId, Object, PointLight,
     SpecularMaterial, TextDraw, Vertex, VulkanRenderer,
 };
 use std::collections::HashSet;
@@ -338,11 +338,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let objects = [
                     Object {
+                        mesh: MeshId::UNASSIGNED,
                         model: models[0],
                         texture: Some(tex_a),
                         specular: specular[0],
                     },
                     Object {
+                        mesh: MeshId::UNASSIGNED,
                         model: models[1],
                         texture: Some(tex_b),
                         specular: specular[1],
