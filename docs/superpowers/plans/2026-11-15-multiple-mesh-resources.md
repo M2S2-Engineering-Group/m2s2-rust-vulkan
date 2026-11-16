@@ -82,7 +82,7 @@ resolved by each object's own mesh.
   GPU work, not just a slot-range check. This is the entire reason the owner id exists; a test that
   only checks an out-of-range slot (not a foreign-but-in-range owner) wouldn't catch a regression
   that dropped the owner check and fell back to pure slot indexing. *Test in Task 1 (handle
-  resolution) and Task 3 (the renderer-level validation pass).*
+  resolution) and Task 4 (the renderer-level validation pass).*
 - **`create_mesh` called with indices that reference a vertex index exactly equal to
   `vertices.len()`** (one past the end, the classic off-by-one) — must be rejected, not accepted as
   if 0-indexed-inclusive. *Test in Task 2.*
@@ -266,8 +266,14 @@ git commit -m "feat(renderer): MeshId, StoredMesh, and the renderer-owned mesh s
 **Files:**
 - Modify: `src/renderer/texture.rs`
 - Create: `src/renderer/scene.rs`
-- Modify: `src/renderer/command.rs` (only the `use` of `Object`'s new location, and any
-  `TextureId(n)` bare-literal test construction sites that no longer compile)
+- Modify: `src/renderer/command.rs` (the `use` of `Object`'s new location, any `TextureId(n)`
+  bare-literal test construction sites that no longer compile, and its own `Object` literal at the
+  test fixture around line 639/644)
+- Modify: `src/renderer/mod.rs` (`render_frame`'s internal `Object` literal — see Step 5a below;
+  `MeshId`'s owner id was NOT yet threaded through this file before this task ran it once and hit a
+  real blocker here, so this file's own compile-preserving patch belongs in this task, not later)
+- Modify: `src/renderer/headless.rs` and `examples/cube.rs` (every existing `Object` literal — see
+  Step 5a; this task now owns making the WHOLE crate compile again, not just `texture.rs`/`scene.rs`)
 
 **Interfaces:**
 - Consumes: Task 1's shared owner-id resolution helper.
@@ -322,40 +328,92 @@ MeshId`. Update `texture.rs`'s own doc comment for `Object` (currently describes
 copy of the uploaded mesh" — update the wording since there are now multiple meshes) — move that doc
 comment to `scene.rs` alongside the relocated struct. Update `mod.rs`/`lib.rs`'s existing `Object`
 export to point at the new path; no caller-visible import path should change (callers still write
-`m2s2_rust_vulkan::Object` or whatever the crate root currently re-exports).
+`m2s2_rust_vulkan::Object` or whatever the crate root currently re-exports). `mesh.rs`'s module
+declaration in `mod.rs` needs `pub(crate)` visibility (plain `mod mesh;` is unreachable from
+`lib.rs`'s re-export) — this is a correction to Task 2's original wiring, make it here.
+
+- [ ] **Step 5a: Patch EVERY existing `Object` literal in the crate with `MeshId::UNASSIGNED`**
+
+`Object` now has a mandatory `mesh: MeshId` field with no `Default`, and this project's pre-commit
+hook builds and tests the WHOLE crate on every commit — there is no way to land this task's commit
+with any `Object { ... }` literal anywhere still missing that field, in ANY file, including this
+crate's own library code. `mesh.rs` (Task 2, already landed) now exposes
+`pub(crate) const MeshId::UNASSIGNED: MeshId` — a deliberately-invalid placeholder (`owner: 0`, never
+allocated by `next_owner_id`) that compiles everywhere but can never resolve against any real
+renderer. Add `mesh: MeshId::UNASSIGNED` to every one of the following, with NO other change to
+each literal's existing fields:
+- `src/renderer/mod.rs`'s `render_frame` method, which internally constructs one `Object` from its
+  `model`/`camera` arguments (this file doesn't gain a `mesh` parameter until Task 4 — for THIS task,
+  the placeholder is the correct, honest stand-in).
+- `src/renderer/command.rs`'s own test fixture (the `Object` literal(s) in its `#[cfg(test)]`
+  module).
+- `src/renderer/headless.rs`'s test module — every existing `Object` literal (there are several:
+  the determinism test, the self-test, the five point-light golden-image tests from spec 018).
+- `examples/cube.rs`'s two existing `Object` literals.
+
+This is a one-line addition per literal, nothing else changes about any of them. Task 4 replaces
+every one of these placeholders: `mod.rs`'s own via `render_frame`'s new `mesh` parameter,
+`command.rs`'s test fixture alongside that task's rewrite of the tests its restructuring breaks,
+`cube.rs`'s via `create_mesh` as part of that same task's example migration, and (per Task 4's own
+absorbed scope) `headless.rs`'s via that module's own new real mesh store — Task 4 is one atomic
+commit covering all of this, since `command.rs`'s restructuring breaks both renderers' callers at
+once (see Task 4's own note on why).
 
 - [ ] **Step 6: Run the full test suite**
 
 Run: `cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo
 build --all-targets && cargo test --all-targets`
-Expected: all clean except wherever `Object { ... }` literals elsewhere in the crate (examples,
-`headless.rs`'s test module) now fail to compile because `Object` gained a mandatory `mesh` field
-with no `Default` — that breakage is EXPECTED and deliberately deferred to Tasks 5/6, which own
-those call sites. Confirm the compile errors you see are only ever "missing field `mesh`" at those
-specific call sites, not something else — if you see any other kind of error, it's a real problem in
-this task's own work and must be fixed here.
+Expected: all clean, full stop — no deferred breakage anywhere. Same pass/ignored counts as the
+branch baseline plus this task's new tests.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/renderer/texture.rs src/renderer/scene.rs src/renderer/command.rs src/renderer/mod.rs src/lib.rs
+git add src/renderer/texture.rs src/renderer/scene.rs src/renderer/command.rs src/renderer/mod.rs src/renderer/headless.rs src/lib.rs examples/cube.rs
 git commit -m "feat(renderer): reject foreign/out-of-range TextureId; relocate Object to scene.rs with a mesh field"
 ```
 
 ---
 
-### Task 4: Wire `VulkanRenderer` — construction, `create_mesh`, early validation, `render_frame`
+### Task 4: Wire `VulkanRenderer`, restructure `command.rs`, migrate `triangle.rs`/`cube.rs`
+
+**This task absorbs what was originally planned as two separate tasks.** Removing `vertices`/
+`indices` from `with_window`/`unsafe new` breaks every caller's constructor CALL (wrong argument
+count), not just a struct literal a placeholder can paper over — there is no `MeshId::UNASSIGNED`-
+style stand-in for a missing function argument. Since this project's pre-commit hook builds and
+tests the whole crate on every commit, the constructor signature change and both examples'
+migration must land in the same commit. Keep the step numbering below as one continuous sequence;
+do not split this into two commits.
+
+**This task ALSO absorbs what was originally planned as part of a separate Task 5** (giving
+`HeadlessRenderer` its own real mesh support), for the same reason: `command.rs`'s
+`emit_object_draws`/`draw_frame` are shared machinery called by BOTH `VulkanRenderer` and
+`HeadlessRenderer`. Changing their signature (Step 5 below) breaks `HeadlessRenderer::render_frame`'s
+one call site too — and since `headless.rs`'s `#[cfg(test)]` module compiles into the SAME lib-test
+binary as every other module's tests, that one broken call site blocks `cargo test --lib`/`--all-
+targets` entirely, not just `headless.rs`'s own tests. There is no minimal placeholder for this (the
+new signature needs a real, resolvable mesh store on both sides); giving `HeadlessRenderer` real mesh
+support now is the only way to land this task's commit at all. The former Task 5 is now scoped down
+to just writing new golden-image scenario tests against the mesh support this task adds, plus the
+user handoff — see the (renumbered) Task 5 below.
 
 **Files:**
 - Modify: `src/renderer/mod.rs`
 - Modify: `src/renderer/command.rs` (the real per-object mesh-bind restructuring)
+- Modify: `examples/triangle.rs`, `examples/cube.rs` (migrate off the removed constructor
+  parameters, replace Task 3's `MeshId::UNASSIGNED` placeholders with real `create_mesh`-derived
+  handles)
+- Modify: `src/renderer/headless.rs` (give `HeadlessRenderer` its own owner id + real mesh store,
+  replacing its existing raw `Buffer::new_device_local` pair with `mesh::upload_mesh`; update every
+  existing `Object` literal from the `MeshId::UNASSIGNED` placeholder to a real mesh id)
 
 **Interfaces:**
 - Consumes: Task 1's `next_owner_id`; Task 2's `validate_mesh_input`/`upload_mesh`/`resolve_mesh`/
   `StoredMesh`/`MeshId`; Task 3's strengthened `resolve_texture_set` and `Object` (now with `mesh:
-  MeshId`) from `scene.rs`. Resolves the compile breakage Task 3 Step 6 deliberately left open at
-  every `Object` literal this file constructs (there should be none in `mod.rs` itself, only in
-  examples/tests Tasks 5/6 own).
+  MeshId`) from `scene.rs`. Task 3 already patched `mod.rs`'s `render_frame` and `command.rs`'s test
+  fixture with the temporary `MeshId::UNASSIGNED` placeholder so the crate kept compiling — this
+  task replaces both placeholders with real values (Step 4 for `render_frame`, Step 6 for
+  `command.rs`'s test), it is not discovering new breakage.
 - Produces: `VulkanRenderer::with_window`/`unsafe new` with `vertices`/`indices` parameters removed;
   `pub fn create_mesh(&mut self, vertices: &[Vertex], indices: &[Index]) -> Result<MeshId>`;
   `pub fn render_frame(&mut self, mesh: MeshId, model: Mat4, camera: Camera) -> Result<()>` (gains
@@ -376,7 +434,7 @@ implementing this task, you find a genuine non-GPU seam for testing `render_obje
 validation ORDER specifically (e.g. a pure function extracted from it that takes the object slice
 and the stores and returns `Result<()>` before touching any renderer state), write it there and
 note the seam in your report. If no such seam exists, say so plainly rather than fabricating a test
-that doesn't exercise real behavior — this will be covered end-to-end by Task 6's GPU scenarios
+that doesn't exercise real behavior — this will be covered end-to-end by Task 5's GPU scenarios
 regardless.
 
 - [ ] **Step 2: Remove `vertices`/`indices` from both constructors and `init`; add `create_mesh`**
@@ -405,9 +463,8 @@ submission."
 
 - [ ] **Step 4: Update `render_frame`'s signature**
 
-Add the leading `mesh: MeshId` parameter; pass it through to whatever internal call `render_frame`
-already delegates to (check its current body — it likely already forwards to `render_objects`-style
-machinery with a single synthesized `Object`).
+Add the leading `mesh: MeshId` parameter; replace Task 3's `MeshId::UNASSIGNED` placeholder in its
+internal synthesized `Object` with this real parameter.
 
 - [ ] **Step 5: Restructure `command.rs`'s per-object draw emission**
 
@@ -425,110 +482,99 @@ DescriptorSet]` is already threaded through today).
 - [ ] **Step 6: Rewrite the two command.rs tests this restructuring breaks**
 
 `mixed_objects_bind_resolved_set_then_push_then_draw_in_order` and its `record_objects` helper
-currently hardcode one shared `index_count` (36) for every object — per this plan's Global
+currently hardcode one shared `index_count` (36) for every object (and, since Task 3, carry a
+temporary `MeshId::UNASSIGNED` placeholder in their `Object` fixtures) — per this plan's Global
 Constraints, rewrite them to exercise interleaved different-mesh objects (mesh A, mesh B, mesh A
-again), asserting each draw uses its own mesh's bind calls and index count, in the original
-submission order. Also re-check `empty_objects_emit_no_commands` still holds unmodified against the
-new per-object mesh-bind path (per this plan's Review Focus) — it should, since an empty slice never
-enters the loop, but confirm rather than assume.
+again) with real resolved meshes, replacing the placeholder entirely, and asserting each draw uses
+its own mesh's bind calls and index count, in the original submission order. Also re-check
+`empty_objects_emit_no_commands` still holds unmodified against the new per-object mesh-bind path
+(per this plan's Review Focus) — it should, since an empty slice never enters the loop, but confirm
+rather than assume.
 
 - [ ] **Step 7: Update `submitted_indices`' computation**
 
 Change from `objects.len() as u64 * index_buffer.len()` to a checked sum of each submitted object's
 own resolved mesh's index count.
 
-- [ ] **Step 8: Run the full test suite**
-
-Run: `cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo
-build --all-targets && cargo test --all-targets`
-Expected: all clean except wherever `examples/`/`headless.rs` still construct a renderer with
-`vertices`/`indices` or an `Object` literal without `mesh` — that breakage is EXPECTED and owned by
-Tasks 5/6. Confirm every remaining compile error is one of those two kinds specifically.
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add src/renderer/mod.rs src/renderer/command.rs
-git commit -m "feat(renderer): wire MeshId into VulkanRenderer construction, validation, and per-object draw emission"
-```
-
----
-
-### Task 5: Migrate `examples/triangle.rs` and `examples/cube.rs`
-
-**Files:**
-- Modify: `examples/triangle.rs`
-- Modify: `examples/cube.rs`
-
-**Interfaces:**
-- Consumes: Task 4's final constructor signatures (no `vertices`/`indices`), `create_mesh`,
-  `render_frame`'s new leading `mesh: MeshId` parameter, and `Object`'s new mandatory `mesh` field.
-- Produces: nothing new for later tasks — this is a leaf migration.
-
-- [ ] **Step 1: Migrate `triangle.rs`**
+- [ ] **Step 8: Migrate `triangle.rs`**
 
 Construct the renderer via `with_window(window, extent)` (no geometry args), then call
 `create_mesh(&vertices, &indices)` once to get a `MeshId`, then pass that `MeshId` as `render_frame`'s
 new leading argument at its existing call site. No visual change — same triangle, same camera.
 
-- [ ] **Step 2: Migrate `cube.rs`**
+- [ ] **Step 9: Migrate `cube.rs`**
 
 Same pattern: construct without geometry, `create_mesh` once for the cube geometry already defined
-in this file, add `mesh: cube_mesh` to both existing `Object` literals (both objects keep referencing
-the same single cube mesh — this task is a pure migration, not a new demonstration; Task 6 is where
-a second, differently-shaped mesh gets exercised, in a dedicated GPU test scene rather than this
-example). Keep every existing control (`KeyCode::KeyH`/`KeyCode::F3`/camera movement/`KeyCode::KeyP`
-from spec 018) working unchanged.
+in this file, and replace Task 3's `MeshId::UNASSIGNED` placeholder in both existing `Object`
+literals with this real mesh id (both objects keep referencing the same single cube mesh — this is
+still a migration, not a new demonstration; Task 5 is where a second, differently-shaped mesh gets
+exercised, in a dedicated GPU test scene rather than this example). Keep every existing control
+(`KeyCode::KeyH`/`KeyCode::F3`/camera movement/`KeyCode::KeyP` from spec 018) working unchanged.
+This is `cube.rs`'s last reference to `MeshId::UNASSIGNED` anywhere in the crate — it is also the
+LAST external (non-`mesh.rs`-test) reference of any kind, since `headless.rs`'s own references are
+removed later in this same task (Step 11), not deferred to Task 5. Once this step is done, re-tighten
+`UNASSIGNED`'s visibility in `mesh.rs` from `pub` back to `pub(crate)` (or tighter, if nothing else
+needs it after Step 11 — check once both this step and Step 11 are done) and update its doc comment
+accordingly, closing the temporary public-API crack Task 3 had to open only because
+`examples/cube.rs` compiles as its own crate.
 
-- [ ] **Step 3: Run the full gate suite**
+- [ ] **Step 10: Give `HeadlessRenderer` its own owner id and real mesh store**
+
+`HeadlessRenderer::new`'s existing signature (`new(extent, vertices, indices)`) is `pub(crate)` test
+infrastructure, not public API — it is NOT required to change by this spec, and this step should
+NOT remove its `vertices`/`indices` parameters (that would be unrequested scope creep onto this
+module's existing contract; callers still pass geometry at construction the same way). What DOES
+need to change: give `HeadlessRenderer` its own `owner: u64` (via `next_owner_id()`, exactly like
+`VulkanRenderer`'s own field from Step 2) and replace its existing two raw
+`Buffer::new_device_local` calls (one for vertices, one for indices) with a single call to
+`mesh::upload_mesh`, storing the result as a one-element `meshes: [mesh::StoredMesh; 1]` (or
+`Vec<StoredMesh>` with exactly one entry pushed at construction — your choice, whichever reads more
+naturally given this struct's existing field style). Expose the single mesh's id (e.g. a `fn
+mesh(&self) -> MeshId` accessor, built once at construction via the same constructor `mesh.rs`
+exposes to `mod.rs`) so call sites can reference it. Update `render_frame`'s one call into
+`command.rs`'s restructured `emit_object_draws`/`draw_frame` to pass `self.owner` and `&self.meshes`,
+matching whatever shape Step 5 settled on.
+
+- [ ] **Step 11: Update every existing `Object` literal in `headless.rs`'s test module**
+
+There are several (the determinism test, the self-test, and the five point-light golden-image tests
+from spec 018) — replace each one's `mesh: MeshId::UNASSIGNED` placeholder with `mesh:
+renderer.mesh()` (or your chosen accessor's name from Step 10). Confirm you haven't missed one by
+running the build (Step 12) rather than grepping and trusting the count. This is `headless.rs`'s
+last reference to `MeshId::UNASSIGNED` anywhere in the crate — once this step is done, the constant
+has no remaining callers outside its own tests in `mesh.rs`; leave the constant itself in place
+(Task 5 may still want it for a scenario test), but if `cargo clippy` flags it as unused outside
+`#[cfg(test)]`, that confirms it's already correctly `#[cfg(test)]`-gated from Task 3's work and
+needs no further change here.
+
+- [ ] **Step 12: Run the full test suite**
 
 Run: `cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo
 build --all-targets && cargo test --all-targets`
-Expected: all clean except `headless.rs`'s remaining `Object`-literal/constructor-signature
-breakage, which Task 6 owns. Confirm every remaining compile error is isolated to `headless.rs`.
+Expected: all clean, full stop. No deferred breakage anywhere — this is the last task in the plan
+that changes any shared renderer/command-recording code, so there is nothing left to defer.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 13: Commit**
 
 ```bash
-git add examples/triangle.rs examples/cube.rs
-git commit -m "feat(examples): migrate triangle and cube to explicit create_mesh/MeshId"
+git add src/renderer/mod.rs src/renderer/command.rs src/renderer/headless.rs examples/triangle.rs examples/cube.rs
+git commit -m "feat(renderer): wire MeshId into VulkanRenderer and HeadlessRenderer, restructure per-object draw emission, migrate examples"
 ```
 
 ---
 
-### Task 6: `HeadlessRenderer` mesh support, GPU golden-image acceptance tests, user handoff
+### Task 5: GPU golden-image acceptance tests, user handoff
 
 **Files:**
 - Modify: `src/renderer/headless.rs`
 
 **Interfaces:**
-- Consumes: Task 2's `mesh.rs` (reused internally — `HeadlessRenderer` is a fully independent struct
-  per spec 019's design, not a mode of `VulkanRenderer`, but it uses the same `handle.rs`/`mesh.rs`
-  machinery rather than inventing a parallel mesh-identity scheme); Task 4's finished
-  `VulkanRenderer` design as the reference pattern for how `HeadlessRenderer` should expose its own
-  mesh creation.
+- Consumes: Task 4's finished `HeadlessRenderer` (its own owner id, real mesh store, and every
+  existing `Object` literal already pointing at a real mesh — nothing in this task's scope is still
+  using `MeshId::UNASSIGNED`).
 - Produces: nothing for later tasks — this plan's final task.
 
-- [ ] **Step 1: Give `HeadlessRenderer` its own owner id and mesh creation**
-
-`HeadlessRenderer::new`'s existing signature (`new(extent, vertices, indices)`) is `pub(crate)` test
-infrastructure, not public API — it is NOT required to change by this spec, and this task should
-NOT remove its `vertices`/`indices` parameters (that would be unrequested scope creep onto a
-different module's existing contract). Instead: give `HeadlessRenderer` its own `owner: u64` (via
-Task 1's `next_owner_id`) and a `meshes: Vec<StoredMesh>` field; have its constructor upload the
-supplied `vertices`/`indices` once via Task 2's `upload_mesh`, storing the resulting single `MeshId`
-alongside the renderer (e.g. a `fn mesh(&self) -> MeshId` accessor) so every existing test's
-`Object { model, texture, specular }` literal can be updated to `Object { mesh: renderer.mesh(),
-model, texture, specular }` with a one-line change per call site, not a restructuring of how
-`HeadlessRenderer` is constructed.
-
-- [ ] **Step 2: Update every existing `Object` literal in `headless.rs`'s test module**
-
-There are several (the determinism test, the self-test, the five point-light golden-image tests from
-spec 018) — add `mesh: renderer.mesh()` (or your chosen accessor's name) to each. Confirm you haven't
-missed one by running the build (Step 4) rather than grepping and trusting the count.
-
-- [ ] **Step 3: Write the new golden-image multi-mesh scenario tests**
+- [ ] **Step 1: Write the new golden-image multi-mesh scenario tests**
 
 Following the existing `self_test_scene_matches_golden_with_zero_validation_errors` test's structure
 (same fixed-camera helper, `assert_matches_golden` at tolerance 2, `renderer.validation_error_count()
@@ -548,25 +594,25 @@ Each needs its own distinct `#[ignore]` reason string naming its own golden PNG 
 `testdata/golden/` (per spec 018's ledgered Important finding — never reuse a byte-identical reason
 string across two different tests, even if two tests legitimately share one golden file).
 
-- [ ] **Step 4: Build and run the full gate suite**
+- [ ] **Step 2: Build and run the full gate suite**
 
 Run: `cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo
 build --all-targets && cargo test --all-targets`
 Expected: all clean; every new/modified test compiles; GPU-dependent tests remain `#[ignore]`d, not
-executed. The ignored-test count increases by however many new scenarios Step 3 added.
+executed. The ignored-test count increases by however many new scenarios Step 1 added.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add src/renderer/headless.rs
-git commit -m "test(renderer): multi-mesh HeadlessRenderer support and golden-image acceptance tests"
+git commit -m "test(renderer): multi-mesh golden-image acceptance tests for HeadlessRenderer"
 ```
 
-- [ ] **Step 6: Hand off to the user — generate the new golden images**
+- [ ] **Step 4: Hand off to the user — generate the new golden images**
 
 This plan's executor has no GPU and cannot complete this step. Report clearly that the user must
 run, on a machine with a Vulkan driver, one `M2S2_UPDATE_GOLDEN=1 cargo test --lib renderer::headless
--- --ignored <test_name>` invocation per new scenario from Step 3 to generate each golden PNG, then
+-- --ignored <test_name>` invocation per new scenario from Step 1 to generate each golden PNG, then
 run the same set of tests **without** `M2S2_UPDATE_GOLDEN` to confirm they pass, and finally re-run
 the full pre-existing `#[ignore]`d suite (every test from specs 018/019) to confirm nothing
 regressed. Only after the user confirms this should the golden PNGs be committed and spec 015's
