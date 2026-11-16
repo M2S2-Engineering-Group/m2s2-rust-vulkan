@@ -546,6 +546,18 @@ impl VulkanRenderer {
 
     /// Upload `vertices`/`indices` into a new renderer-owned mesh, returning its handle. The mesh is
     /// freed when the renderer drops.
+    ///
+    /// ```no_run
+    /// use m2s2_rust_vulkan::{Camera, Index, Object, Result, SpecularMaterial, Vertex, VulkanRenderer};
+    /// use m2s2_rust_vulkan::math::Mat4;
+    /// fn draw(renderer: &mut VulkanRenderer, vertices: &[Vertex], indices: &[Index], camera: Camera) -> Result<()> {
+    ///     let mesh = renderer.create_mesh(vertices, indices)?;
+    ///     let objects = [Object { mesh, model: Mat4::IDENTITY, texture: None,
+    ///         specular: SpecularMaterial::default() }];
+    ///     renderer.render_objects(&objects, camera)?;
+    ///     renderer.render_frame(mesh, Mat4::IDENTITY, camera)
+    /// }
+    /// ```
     pub fn create_mesh(
         &mut self,
         vertices: &[buffer::Vertex],

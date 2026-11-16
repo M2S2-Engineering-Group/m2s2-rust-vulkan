@@ -15,6 +15,7 @@ use crate::renderer::mesh::{self, MeshId, StoredMesh};
 use crate::renderer::pipeline::{self, GraphicsPipeline};
 use crate::renderer::scene::Object;
 use crate::renderer::submission::{SubmitState, SubmitStep};
+use crate::renderer::text::{self, TextDraw, TextRenderer, TextVertex};
 use crate::renderer::texture::{self, StoredTexture};
 use crate::renderer::uniform::{self, Uniforms};
 use ash::vk;
@@ -225,9 +226,7 @@ pub(crate) struct HeadlessRenderer {
     device: ManuallyDrop<VulkanDevice>,
     instance: ManuallyDrop<VulkanInstance>,
     allocator: ManuallyDrop<Allocator>,
-    // The single mesh uploaded at construction (see `new`), mirroring `VulkanRenderer`'s own
-    // `meshes`/`owner_id` pair so `command::emit_object_draws`'s per-object resolution works
-    // identically against either renderer.
+    // Append-only store resolved by the same command path as VulkanRenderer.
     meshes: Vec<StoredMesh>,
     owner: u64,
     depth: Option<DepthResources>,
@@ -237,6 +236,9 @@ pub(crate) struct HeadlessRenderer {
     light: Option<Light>,
     pipeline: ManuallyDrop<GraphicsPipeline>,
     target: Option<OffscreenTarget>,
+    text: Option<TextRenderer>,
+    text_vertices: Vec<TextVertex>,
+    terminal: bool,
 }
 
 impl HeadlessRenderer {
@@ -244,6 +246,12 @@ impl HeadlessRenderer {
     /// rollback-on-error pattern), substituting the headless instance/device and an `OffscreenTarget`
     /// for the swapchain. `extent` sizes the depth attachment and the offscreen color target alike.
     pub(crate) fn new(extent: (u32, u32), vertices: &[Vertex], indices: &[Index]) -> Result<Self> {
+        let mut renderer = Self::new_empty(extent)?;
+        renderer.create_mesh(vertices, indices)?;
+        Ok(renderer)
+    }
+
+    pub(crate) fn new_empty(extent: (u32, u32)) -> Result<Self> {
         let instance = VulkanInstance::new_headless()?;
         let device = VulkanDevice::new_headless(&instance)?;
         let mut allocator = Allocator::new(&instance, &device)?;
@@ -253,7 +261,6 @@ impl HeadlessRenderer {
             height: extent.1,
         };
 
-        let mut mesh = None;
         let mut depth = None;
         let mut uniforms = None;
         let mut texture_set_layout = None;
@@ -261,13 +268,6 @@ impl HeadlessRenderer {
         let mut light = None;
         let mut target = None;
         let resources = (|| {
-            mesh = Some(mesh::upload_mesh(
-                &device,
-                &mut allocator,
-                vertices,
-                indices,
-            )?);
-
             depth = Some(DepthResources::new(
                 &instance,
                 &device,
@@ -332,9 +332,6 @@ impl HeadlessRenderer {
                 if let Some(resource) = depth.take() {
                     resource.destroy(&device, &mut allocator);
                 }
-                if let Some(resource) = mesh.take() {
-                    resource.destroy(&device, &mut allocator);
-                }
                 return Err(error);
             }
         };
@@ -343,7 +340,7 @@ impl HeadlessRenderer {
             device: ManuallyDrop::new(device),
             instance: ManuallyDrop::new(instance),
             allocator: ManuallyDrop::new(allocator),
-            meshes: vec![mesh.expect("mesh present after successful construction")],
+            meshes: Vec::new(),
             owner: handle::next_owner_id(),
             depth,
             uniforms,
@@ -352,6 +349,9 @@ impl HeadlessRenderer {
             light,
             pipeline: ManuallyDrop::new(pipeline),
             target,
+            text: None,
+            text_vertices: Vec::new(),
+            terminal: false,
         })
     }
 
@@ -369,6 +369,55 @@ impl HeadlessRenderer {
         directional_light: &DirectionalLight,
         point_lights: &[PointLight],
     ) -> Result<Vec<u8>> {
+        self.render_frame_with_text(objects, camera, directional_light, point_lights, &[])
+    }
+
+    pub(crate) fn render_frame_with_text(
+        &mut self,
+        objects: &[Object],
+        camera: uniform::Camera,
+        directional_light: &DirectionalLight,
+        point_lights: &[PointLight],
+        draws: &[TextDraw<'_>],
+    ) -> Result<Vec<u8>> {
+        if self.terminal {
+            return Err(VulkanError::Terminal(
+                "headless renderer is terminal".into(),
+            ));
+        }
+        uniform::validate_camera(&camera)?;
+        for object in objects {
+            texture::validate_specular(&object.specular)?;
+            mesh::resolve_mesh(object.mesh, self.owner, &self.meshes)?;
+            texture::resolve_texture_set(
+                object.texture,
+                self.owner,
+                &[],
+                self.white_texture.as_ref().unwrap().set,
+            )?;
+        }
+        let target = self.target.as_ref().unwrap();
+        text::layout_text(draws, target.extent(), &mut self.text_vertices)?;
+        if self.text.is_none() && !self.text_vertices.is_empty() {
+            let result = TextRenderer::new(
+                &self.device,
+                &mut self.allocator,
+                target.format(),
+                self.depth.as_ref().unwrap().format(),
+            );
+            match result {
+                Ok(text) => self.text = Some(text),
+                Err(error) => {
+                    if matches!(error, VulkanError::Terminal(_)) {
+                        self.terminal = true;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        if let Some(text) = self.text.as_mut() {
+            text.update(0, &self.text_vertices)?;
+        }
         self.uniforms
             .as_mut()
             .expect("uniforms present outside teardown")
@@ -589,6 +638,9 @@ impl HeadlessRenderer {
                 },
             );
 
+            if let Some(text) = self.text.as_ref() {
+                text.record(dev, cmd, 0, self.text_vertices.len() as u32);
+            }
             dev.cmd_end_rendering(cmd);
 
             let to_transfer = vk::ImageMemoryBarrier::default()
@@ -663,6 +715,7 @@ impl HeadlessRenderer {
             // possibly-in-use resources (mirrors upload::submit_once).
             pool_cleanup.disarm();
             fence_cleanup.disarm();
+            self.terminal = true;
             return Err(VulkanError::Terminal(format!(
                 "headless render fence wait could not confirm completion: {:?}",
                 wait.err()
@@ -696,9 +749,30 @@ impl HeadlessRenderer {
         self.instance.validation_error_count()
     }
 
-    /// The single mesh this renderer uploaded at construction, for test code to reference in
-    /// `Object` literals instead of the `MeshId::UNASSIGNED` placeholder.
+    /// Upload additional geometry using the production mesh uploader.
+    pub(crate) fn create_mesh(&mut self, vertices: &[Vertex], indices: &[Index]) -> Result<MeshId> {
+        if self.terminal {
+            return Err(VulkanError::Terminal(
+                "headless renderer is terminal".into(),
+            ));
+        }
+        let mesh = match mesh::upload_mesh(&self.device, &mut self.allocator, vertices, indices) {
+            Ok(mesh) => mesh,
+            Err(error) => {
+                if matches!(error, VulkanError::Terminal(_)) {
+                    self.terminal = true;
+                }
+                return Err(error);
+            }
+        };
+        let id = MeshId::new(self.owner, self.meshes.len());
+        self.meshes.push(mesh);
+        Ok(id)
+    }
+
+    /// Existing single-mesh fixtures keep their original handle and pixels.
     pub(crate) fn mesh(&self) -> MeshId {
+        assert!(!self.meshes.is_empty(), "no mesh was uploaded");
         MeshId::new(self.owner, 0)
     }
 }
@@ -727,9 +801,23 @@ fn depth_stages() -> vk::PipelineStageFlags {
 
 impl Drop for HeadlessRenderer {
     fn drop(&mut self) {
+        if self.terminal {
+            // Native parents are ManuallyDrop; retain every dependent allocation too.
+            std::mem::forget(self.uniforms.take());
+            std::mem::forget(self.light.take());
+            std::mem::forget(self.depth.take());
+            std::mem::forget(self.white_texture.take());
+            std::mem::forget(self.target.take());
+            std::mem::forget(self.text.take());
+            std::mem::forget(std::mem::take(&mut self.meshes));
+            return;
+        }
         // Reverse construction order, mirroring VulkanRenderer::Drop: everything allocator-backed
         // before the allocator, the allocator before the device, the device before the instance.
         unsafe {
+            if let Some(text) = self.text.take() {
+                text.destroy(&self.device, &mut self.allocator);
+            }
             ManuallyDrop::drop(&mut self.pipeline);
             if let Some(light) = self.light.take() {
                 light.destroy(&self.device, &mut self.allocator);
@@ -1227,6 +1315,197 @@ mod tests {
             "/testdata/golden/point_light_eight_lights_and_ambient_does_not_scale.png"
         ));
         assert_matches_golden(&pixels, 64, 64, golden_path, 2).expect("pixel comparison");
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
+
+    const MULTI_MESH_EXTENT: (u32, u32) = (128, 128);
+
+    fn mesh_scenario_camera() -> uniform::Camera {
+        use crate::math::{look_at, perspective, to_radians, Vec3};
+        let position = Vec3::new(0.0, 1.0, 4.0);
+        uniform::Camera {
+            position,
+            view: look_at(
+                &position,
+                &Vec3::new(0.0, 0.0, 0.0),
+                &Vec3::new(0.0, 1.0, 0.0),
+            ),
+            proj: perspective(to_radians(45.0), 1.0, 0.1, 10.0),
+        }
+    }
+
+    fn mesh_object(mesh: MeshId, x: f32) -> Object {
+        Object {
+            mesh,
+            model: crate::math::translate(&crate::math::Vec3::new(x, 0.0, 0.0)),
+            texture: None,
+            specular: texture::SpecularMaterial::default(),
+        }
+    }
+
+    fn triangle_mesh() -> ([Vertex; 3], [Index; 3]) {
+        use crate::math::{Vec2, Vec3};
+        let vertices = [(-0.45, -0.5), (0.45, -0.5), (0.0, 0.6)].map(|(x, y)| Vertex {
+            position: Vec3::new(x, y, 0.0),
+            color: Vec3::new(0.2, 0.8, 1.0),
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            uv: Vec2::new(0.0, 0.0),
+        });
+        (vertices, [0, 1, 2])
+    }
+
+    fn assert_mesh_golden(renderer: &HeadlessRenderer, pixels: &[u8], name: &str) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata/golden")
+            .join(name);
+        super::super::golden::assert_matches_golden(
+            pixels,
+            MULTI_MESH_EXTENT.0,
+            MULTI_MESH_EXTENT.1,
+            &path,
+            2,
+        )
+        .expect("mesh pixel comparison");
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/multi_mesh_different.png"]
+    fn multi_mesh_different_geometry_matches_golden() {
+        let mut renderer = HeadlessRenderer::new_empty(MULTI_MESH_EXTENT).unwrap();
+        let (vertices, indices) = lit_untextured_cube();
+        let cube = renderer.create_mesh(&vertices, &indices).unwrap();
+        let (vertices, indices) = triangle_mesh();
+        let triangle = renderer.create_mesh(&vertices, &indices).unwrap();
+        let camera = mesh_scenario_camera();
+        let light = DirectionalLight::default();
+        let pixels = renderer
+            .render_frame(
+                &[mesh_object(cube, -0.7), mesh_object(triangle, 0.7)],
+                camera,
+                &light,
+                &[],
+            )
+            .unwrap();
+        let wrong_geometry = renderer
+            .render_frame(
+                &[mesh_object(cube, -0.7), mesh_object(cube, 0.7)],
+                camera,
+                &light,
+                &[],
+            )
+            .unwrap();
+        assert_ne!(
+            pixels, wrong_geometry,
+            "the second mesh must change actual rendered geometry"
+        );
+        assert_mesh_golden(&renderer, &pixels, "multi_mesh_different.png");
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/multi_mesh_repeated.png"]
+    fn multi_mesh_repeated_handle_matches_golden() {
+        let mut renderer = HeadlessRenderer::new_empty(MULTI_MESH_EXTENT).unwrap();
+        let (vertices, indices) = lit_untextured_cube();
+        let mesh = renderer.create_mesh(&vertices, &indices).unwrap();
+        let objects = [mesh_object(mesh, -0.7), mesh_object(mesh, 0.7)];
+        let camera = mesh_scenario_camera();
+        let light = DirectionalLight::default();
+        let pixels = renderer
+            .render_frame(&objects, camera, &light, &[])
+            .unwrap();
+        let single = renderer
+            .render_frame(&objects[..1], camera, &light, &[])
+            .unwrap();
+        assert_ne!(
+            pixels, single,
+            "a repeated handle must still draw the second object"
+        );
+        assert_mesh_golden(&renderer, &pixels, "multi_mesh_repeated.png");
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/multi_mesh_text_only.png"]
+    fn multi_mesh_zero_meshes_text_only_matches_golden() {
+        use crate::math::{Vec2, Vec4};
+        let mut renderer = HeadlessRenderer::new_empty(MULTI_MESH_EXTENT).unwrap();
+        let camera = mesh_scenario_camera();
+        let light = DirectionalLight::default();
+        let clear = renderer.render_frame(&[], camera, &light, &[]).unwrap();
+        let draws = [TextDraw {
+            text: "No meshes\nText works",
+            position: Vec2::new(4.0, 4.0),
+            scale: 1.0,
+            color: Vec4::new(1.0, 1.0, 1.0, 1.0),
+        }];
+        let pixels = renderer
+            .render_frame_with_text(&[], camera, &light, &[], &draws)
+            .unwrap();
+        assert!(renderer.meshes.is_empty());
+        assert_ne!(
+            pixels, clear,
+            "text must produce visible pixels with no meshes"
+        );
+        assert_eq!(
+            renderer.render_frame(&[], camera, &light, &[]).unwrap(),
+            clear,
+            "text must not persist into the next frame"
+        );
+        assert_mesh_golden(&renderer, &pixels, "multi_mesh_text_only.png");
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; verifies multi-mesh invalid input rejection and reuse"]
+    fn multi_mesh_rejects_invalid_handles_and_uploads_then_renders_again() {
+        let mut renderer = HeadlessRenderer::new_empty(MULTI_MESH_EXTENT).unwrap();
+        let (vertices, indices) = lit_untextured_cube();
+        let mesh = renderer.create_mesh(&vertices, &indices).unwrap();
+        let camera = mesh_scenario_camera();
+        let light = DirectionalLight::default();
+        let baseline = renderer
+            .render_frame(&[mesh_object(mesh, 0.0)], camera, &light, &[])
+            .unwrap();
+        let count = renderer.meshes.len();
+        assert!(renderer.create_mesh(&vertices, &[0, 1, u16::MAX]).is_err());
+        assert_eq!(renderer.meshes.len(), count);
+        for invalid in [
+            MeshId::new(handle::next_owner_id(), 0),
+            MeshId::new(renderer.owner, count),
+        ] {
+            assert!(matches!(
+                renderer.render_frame(
+                    &[mesh_object(mesh, 0.0), mesh_object(invalid, 0.5)],
+                    camera,
+                    &light,
+                    &[]
+                ),
+                Err(VulkanError::ValidationError(_))
+            ));
+        }
+        let mut object = mesh_object(mesh, 0.0);
+        object.texture = Some(texture::TextureId::new(handle::next_owner_id(), 0));
+        assert!(matches!(
+            renderer.render_frame(&[object], camera, &light, &[]),
+            Err(VulkanError::ValidationError(_))
+        ));
+        assert_eq!(
+            renderer
+                .render_frame(&[mesh_object(mesh, 0.0)], camera, &light, &[])
+                .unwrap(),
+            baseline
+        );
+        // Simulate terminal state only after completion; no real GPU work is pending here.
+        renderer.terminal = true;
+        assert!(matches!(
+            renderer.render_frame(&[], camera, &light, &[]),
+            Err(VulkanError::Terminal(_))
+        ));
+        assert!(matches!(
+            renderer.create_mesh(&vertices, &indices),
+            Err(VulkanError::Terminal(_))
+        ));
+        // Restore the fixture for ordinary teardown; this is not a production recovery path.
+        renderer.terminal = false;
         assert_eq!(renderer.validation_error_count(), 0);
     }
 }

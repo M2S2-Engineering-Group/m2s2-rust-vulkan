@@ -29,24 +29,6 @@ impl MeshId {
     pub(super) fn new(owner: u64, slot: usize) -> Self {
         Self { owner, slot }
     }
-
-    /// A deliberately-invalid placeholder: `owner: 0` is never allocated by
-    /// `handle::next_owner_id` (its first real id is 1), so this can never resolve against any
-    /// real renderer's store. Exists only for same-crate test code (`headless.rs`, until Task 5)
-    /// that still needs an `Object` literal's `mesh` field filled in without a real renderer to
-    /// call `create_mesh` on — every production/example call site that constructs this is a bug,
-    /// not a valid use. `pub(crate)`: `examples/cube.rs` (the last external user) was migrated off
-    /// this in Task 4, so the temporary public-API crack that required `pub` visibility is closed.
-    /// `#[cfg(test)]`: with `cube.rs` migrated, `headless.rs` is its only remaining reader, and that
-    /// module is itself `#[cfg(test)]`-only — without the same gate here, a non-test build would see
-    /// this as dead code.
-    // Task 4 (Step 11) migrated headless.rs's own Object literals off this placeholder onto
-    // `HeadlessRenderer::mesh()`, so nothing in the crate references it right now — a temporary,
-    // clearly-labeled allow, same convention as spec 018's Task 1. Task 5 may give it a new reader
-    // (a no-mesh scenario test); if it still has none after that task, remove it then.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) const UNASSIGNED: MeshId = MeshId { owner: 0, slot: 0 };
 }
 
 /// Checked `usize -> u32` conversion for a vertex/index count. GPU buffer lengths (`Buffer::len`)

@@ -13,14 +13,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Process-wide monotonic owner ID counter. Starts at 0; `next_owner_id()` pre-increments so the
 /// first real ID is 1, and zero is never a valid owner ID.
-#[allow(dead_code)]
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Return the next unique owner ID for a renderer instance. Calls are monotonically increasing and
 /// never repeat. The first call returns 1 (never 0), so a default/zeroed ID is always invalid.
-#[allow(dead_code)]
 pub(crate) fn next_owner_id() -> u64 {
-    COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+    allocate_owner_id(&COUNTER)
+}
+
+fn allocate_owner_id(counter: &AtomicU64) -> u64 {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .expect("renderer owner identifiers exhausted")
+        + 1
 }
 
 /// Validate a `(owner_id, slot)` resource handle against a specific renderer's owner ID and store
@@ -35,7 +42,6 @@ pub(crate) fn next_owner_id() -> u64 {
 /// - `slot`: The resource index from the handle being resolved.
 /// - `my_owner`: The owner ID of the renderer store being checked against.
 /// - `store_len`: The number of valid slots in the renderer's store.
-#[allow(dead_code)]
 pub(crate) fn resolve_handle(
     owner: u64,
     slot: usize,
@@ -52,6 +58,14 @@ pub(crate) fn resolve_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_ids_fail_closed_on_exhaustion_without_wrapping() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(allocate_owner_id(&counter), u64::MAX);
+        assert!(std::panic::catch_unwind(|| allocate_owner_id(&counter)).is_err());
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
 
     #[test]
     fn next_owner_id_never_repeats_across_many_calls() {
