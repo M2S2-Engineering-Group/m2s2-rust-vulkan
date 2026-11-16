@@ -171,10 +171,10 @@ fn text_pipeline(
         PipelineDescription {
             vertex_shader: include_bytes!("../../shaders/text.vert.spv"),
             fragment_shader: include_bytes!("../../shaders/text.frag.spv"),
-            binding: vk::VertexInputBindingDescription::default()
+            bindings: &[vk::VertexInputBindingDescription::default()
                 .binding(0)
                 .stride(std::mem::size_of::<TextVertex>() as u32)
-                .input_rate(vk::VertexInputRate::VERTEX),
+                .input_rate(vk::VertexInputRate::VERTEX)],
             attributes: &attributes,
             depth_test: false,
             cull_mode: vk::CullModeFlags::NONE,

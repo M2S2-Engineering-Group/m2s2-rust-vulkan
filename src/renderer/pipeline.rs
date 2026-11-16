@@ -94,7 +94,7 @@ fn validate_push_limit(limit: u32) -> Result<()> {
 pub(super) struct PipelineDescription<'a> {
     pub vertex_shader: &'a [u8],
     pub fragment_shader: &'a [u8],
-    pub binding: vk::VertexInputBindingDescription,
+    pub bindings: &'a [vk::VertexInputBindingDescription],
     pub attributes: &'a [vk::VertexInputAttributeDescription],
     pub depth_test: bool,
     pub cull_mode: vk::CullModeFlags,
@@ -133,7 +133,7 @@ impl GraphicsPipeline {
             PipelineDescription {
                 vertex_shader: VERTEX_SHADER,
                 fragment_shader: FRAGMENT_SHADER,
-                binding: Vertex::binding_description(),
+                bindings: &[Vertex::binding_description()],
                 attributes: &Vertex::attribute_descriptions(),
                 depth_test: true,
                 cull_mode: vk::CullModeFlags::BACK,
@@ -183,10 +183,10 @@ impl GraphicsPipeline {
 
         // Shared construction accepts scene or text vertex layouts; the caller keeps descriptions
         // alive until create_graphics_pipelines reads them.
-        let binding_descriptions = [description.binding];
+        let binding_descriptions = description.bindings;
         let attribute_descriptions = description.attributes;
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_binding_descriptions(&binding_descriptions)
+            .vertex_binding_descriptions(binding_descriptions)
             .vertex_attribute_descriptions(attribute_descriptions);
 
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
