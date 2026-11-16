@@ -7,6 +7,7 @@ pub mod device;
 pub mod diagnostics;
 #[cfg(test)]
 pub(crate) mod golden;
+mod handle;
 #[cfg(test)]
 pub(crate) mod headless;
 mod image;
