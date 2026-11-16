@@ -2,7 +2,7 @@ use m2s2_rust_vulkan::math::{
     look_at, perspective, rotate, to_radians, translate, Vec2, Vec3, Vec4,
 };
 use m2s2_rust_vulkan::{
-    init_logging, Camera, Diagnostics, DirectionalLight, Index, MeshId, Object, PointLight,
+    init_logging, Camera, Diagnostics, DirectionalLight, Index, Object, PointLight,
     SpecularMaterial, TextDraw, Vertex, VulkanRenderer,
 };
 use std::collections::HashSet;
@@ -167,12 +167,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let mut renderer = VulkanRenderer::with_window(
-        Arc::clone(&window),
-        (size.width, size.height),
-        &vertices,
-        &indices,
-    )?;
+    let mut renderer = VulkanRenderer::with_window(Arc::clone(&window), (size.width, size.height))?;
+    let cube_mesh = renderer.create_mesh(&vertices, &indices)?;
 
     // Two 2x2 RGBA8 textures: a red/white checker and a blue/green checker.
     fn checker(a: [u8; 4], b: [u8; 4]) -> [u8; 16] {
@@ -338,13 +334,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let objects = [
                     Object {
-                        mesh: MeshId::UNASSIGNED,
+                        mesh: cube_mesh,
                         model: models[0],
                         texture: Some(tex_a),
                         specular: specular[0],
                     },
                     Object {
-                        mesh: MeshId::UNASSIGNED,
+                        mesh: cube_mesh,
                         model: models[1],
                         texture: Some(tex_b),
                         specular: specular[1],

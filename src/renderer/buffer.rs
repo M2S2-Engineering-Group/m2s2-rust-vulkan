@@ -69,9 +69,8 @@ impl Vertex {
 pub struct Buffer {
     pub(crate) buffer: vk::Buffer,
     allocation: Option<Allocation>,
-    len: u32,
     /// Logical byte capacity the caller may write via `write_mapped` — the requested size, distinct
-    /// from element count (`len`) and from any allocator padding behind the mapping.
+    /// from any allocator padding behind the mapping.
     logical_capacity: usize,
 }
 
@@ -134,7 +133,6 @@ impl Buffer {
             Ok(Self {
                 buffer,
                 allocation: Some(allocation),
-                len: data.len() as u32,
                 logical_capacity: bytes.len(),
             })
         })();
@@ -145,8 +143,7 @@ impl Buffer {
 
     /// Create a `HOST_VISIBLE` buffer that gpu-allocator keeps persistently mapped, for data the CPU
     /// rewrites every frame (uniform buffers). Unlike `new_device_local` there's no staging copy —
-    /// the caller writes straight into the mapping via `write_mapped`. `len` is left 0 (not a draw
-    /// source). See specs/006.
+    /// the caller writes straight into the mapping via `write_mapped`. See specs/006.
     pub(crate) fn new_host_visible_mapped(
         device: &VulkanDevice,
         allocator: &mut Allocator,
@@ -164,7 +161,6 @@ impl Buffer {
         Ok(Self {
             buffer,
             allocation: Some(allocation),
-            len: 0,
             logical_capacity: size as usize,
         })
     }
@@ -190,9 +186,17 @@ impl Buffer {
         Ok(())
     }
 
-    /// Element count (vertices or indices), for `cmd_draw` / `cmd_draw_indexed`.
-    pub(crate) fn len(&self) -> u32 {
-        self.len
+    /// Construct a CPU-only fixture wrapping a raw `buffer`, with no real GPU allocation behind it.
+    /// For `command.rs`'s mesh-resolution unit tests, which exercise `emit_object_draws`'s per-object
+    /// bind/draw-count logic without a Vulkan device. Never call `destroy` on the result: there is no
+    /// allocation to free and no device backs the raw handle.
+    #[cfg(test)]
+    pub(crate) fn test_fixture(buffer: vk::Buffer) -> Self {
+        Self {
+            buffer,
+            allocation: None,
+            logical_capacity: 0,
+        }
     }
 
     /// Read-only view into this buffer's persistent mapping (the write-direction counterpart to

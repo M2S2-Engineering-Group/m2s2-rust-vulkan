@@ -4,11 +4,11 @@
 // straight port of vulkan-tutorial.com's render-pass-based version.
 
 use super::light::{DirectionalLight, Light, PointLight};
+use super::mesh::{self, StoredMesh};
 use super::scene::Object;
 use super::text::{TextRenderer, TextVertex};
 use super::texture::resolve_texture_set;
 use crate::error::{Result, VulkanError};
-use crate::renderer::buffer::Buffer;
 use crate::renderer::depth::DepthResources;
 use crate::renderer::device::VulkanDevice;
 use crate::renderer::pipeline::{
@@ -137,14 +137,13 @@ impl FrameContext {
         swapchain: &VulkanSwapchain,
         depth: &DepthResources,
         uniforms: &mut Uniforms,
-        vertex_buffer: &Buffer,
-        index_buffer: &Buffer,
         camera: &CameraUniforms,
         light: &mut Light,
         directional_light: &DirectionalLight,
         point_lights: &[PointLight],
         objects: &[Object],
         owner: u64,
+        meshes: &[StoredMesh],
         texture_sets: &[vk::DescriptorSet],
         white_set: vk::DescriptorSet,
         mut text: Option<&mut TextRenderer>,
@@ -225,10 +224,9 @@ impl FrameContext {
             uniforms.descriptor_set(frame),
             light.descriptor_set(frame),
             image_index,
-            vertex_buffer,
-            index_buffer,
             objects,
             owner,
+            meshes,
             texture_sets,
             white_set,
             text.as_deref(),
@@ -302,10 +300,9 @@ impl FrameContext {
         descriptor_set: vk::DescriptorSet,
         light_set: vk::DescriptorSet,
         image_index: u32,
-        vertex_buffer: &Buffer,
-        index_buffer: &Buffer,
         objects: &[Object],
         owner: u64,
+        meshes: &[StoredMesh],
         texture_sets: &[vk::DescriptorSet],
         white_set: vk::DescriptorSet,
         text: Option<&TextRenderer>,
@@ -438,16 +435,13 @@ impl FrameContext {
             };
             dev.cmd_set_scissor(cmd, 0, &[scissor]);
 
-            // e. Bind the vertex + index buffers and draw the indexed geometry.
-            dev.cmd_bind_vertex_buffers(cmd, 0, &[vertex_buffer.buffer], &[0]);
-            dev.cmd_bind_index_buffer(cmd, index_buffer.buffer, 0, vk::IndexType::UINT16);
-            emit_object_draws(
-                objects,
-                index_buffer.len(),
-                owner,
-                texture_sets,
-                white_set,
-                |command| match command {
+            // e. Bind each object's own mesh, texture, and model, then draw the indexed geometry.
+            emit_object_draws(objects, owner, meshes, texture_sets, white_set, |command| {
+                match command {
+                    ObjectCommand::BindMesh(vertex_buffer, index_buffer) => {
+                        dev.cmd_bind_vertex_buffers(cmd, 0, &[vertex_buffer], &[0]);
+                        dev.cmd_bind_index_buffer(cmd, index_buffer, 0, vk::IndexType::UINT16);
+                    }
                     ObjectCommand::BindTexture(set) => dev.cmd_bind_descriptor_sets(
                         cmd,
                         vk::PipelineBindPoint::GRAPHICS,
@@ -466,8 +460,8 @@ impl FrameContext {
                     ObjectCommand::DrawIndexed(index_count) => {
                         dev.cmd_draw_indexed(cmd, index_count, 1, 0, 0, 0);
                     }
-                },
-            );
+                }
+            });
 
             if let Some(text) = text {
                 text.record(dev, cmd, frame, text_vertex_count);
@@ -505,23 +499,34 @@ impl FrameContext {
 
 // One emission path for Vulkan recording and CPU tests; no per-frame command list allocation.
 pub(super) enum ObjectCommand<'a> {
+    BindMesh(vk::Buffer, vk::Buffer),
     BindTexture(vk::DescriptorSet),
     PushModel(&'a [u8]),
     DrawIndexed(u32),
 }
 
+/// Emit each object's bind-mesh/bind-texture/push-model/draw-indexed sequence, in submission order.
+/// `object.mesh`/`object.texture` are resolved here via `mesh::resolve_mesh`/`resolve_texture_set` —
+/// both `.expect`-able because the caller (`render_objects_with_text`'s up-front validation pass)
+/// already proved every object's handles resolve against `owner`/`meshes`/`texture_sets` before any
+/// of this runs.
 pub(super) fn emit_object_draws(
     objects: &[Object],
-    index_count: u32,
     owner: u64,
+    meshes: &[StoredMesh],
     texture_sets: &[vk::DescriptorSet],
     white_set: vk::DescriptorSet,
     mut emit: impl FnMut(ObjectCommand<'_>),
 ) {
     for object in objects {
-        let set = resolve_texture_set(object.texture, owner, texture_sets, white_set).expect(
-            "object handles are not yet validated before this point — this placeholder is replaced by Task 4's up-front validation pass",
-        );
+        let resolved = mesh::resolve_mesh(object.mesh, owner, meshes)
+            .expect("object handles were validated above, before this point was reached");
+        emit(ObjectCommand::BindMesh(
+            resolved.vertex_buffer.buffer,
+            resolved.index_buffer.buffer,
+        ));
+        let set = resolve_texture_set(object.texture, owner, texture_sets, white_set)
+            .expect("object handles were validated above, before this point was reached");
         emit(ObjectCommand::BindTexture(set));
         let constants = ModelPushConstants {
             model: object.model,
@@ -529,7 +534,7 @@ pub(super) fn emit_object_draws(
             shininess: object.specular.shininess,
         };
         emit(ObjectCommand::PushModel(bytemuck::bytes_of(&constants)));
-        emit(ObjectCommand::DrawIndexed(index_count));
+        emit(ObjectCommand::DrawIndexed(resolved.index_count));
     }
 }
 
@@ -585,12 +590,14 @@ impl Drop for FrameContext {
 
 #[cfg(test)]
 mod tests {
+    use super::super::buffer::Buffer;
     use super::super::texture::SpecularMaterial;
     use super::*;
     use ash::vk::Handle;
 
     #[derive(Debug, PartialEq)]
     enum RecordedCommand {
+        Mesh(vk::Buffer, vk::Buffer),
         Bind(vk::DescriptorSet),
         Push(Vec<u8>),
         Draw(u32),
@@ -600,15 +607,27 @@ mod tests {
         vk::DescriptorSet::from_raw(raw)
     }
 
+    /// A CPU-only `StoredMesh` fixture: `vertex_raw`/`index_raw` become its bind-call handles (so
+    /// tests can tell which mesh a `BindMesh` command came from), `index_count` its draw count.
+    fn stored_mesh(vertex_raw: u64, index_raw: u64, index_count: u32) -> StoredMesh {
+        StoredMesh {
+            vertex_buffer: Buffer::test_fixture(vk::Buffer::from_raw(vertex_raw)),
+            index_buffer: Buffer::test_fixture(vk::Buffer::from_raw(index_raw)),
+            index_count,
+        }
+    }
+
     fn record_objects(
         objects: &[Object],
         owner: u64,
+        meshes: &[StoredMesh],
         sets: &[vk::DescriptorSet],
         white: vk::DescriptorSet,
     ) -> Vec<RecordedCommand> {
         let mut commands = Vec::new();
-        emit_object_draws(objects, 36, owner, sets, white, |command| {
+        emit_object_draws(objects, owner, meshes, sets, white, |command| {
             commands.push(match command {
+                ObjectCommand::BindMesh(vertex, index) => RecordedCommand::Mesh(vertex, index),
                 ObjectCommand::BindTexture(s) => RecordedCommand::Bind(s),
                 ObjectCommand::PushModel(bytes) => RecordedCommand::Push(bytes.to_vec()),
                 ObjectCommand::DrawIndexed(count) => RecordedCommand::Draw(count),
@@ -620,38 +639,64 @@ mod tests {
     #[test]
     fn empty_objects_emit_no_commands() {
         let owner = crate::renderer::handle::next_owner_id();
-        assert!(record_objects(&[], owner, &[set(0xA0)], set(0x10)).is_empty());
+        assert!(record_objects(&[], owner, &[], &[set(0xA0)], set(0x10)).is_empty());
     }
 
     #[test]
-    fn mixed_objects_bind_resolved_set_then_push_then_draw_in_order() {
+    fn interleaved_objects_bind_each_objects_own_mesh_texture_and_model_in_order() {
         let white = set(0x10);
         let sets = [set(0xA0), set(0xB0)];
         let owner = crate::renderer::handle::next_owner_id();
+        // Two distinct meshes with different index counts, so a wrong bind/count pairing would be
+        // visible in the asserted command sequence below.
+        let meshes = [
+            stored_mesh(0x1000, 0x1001, 3),
+            stored_mesh(0x2000, 0x2001, 6),
+        ];
+        let mesh_a = mesh::MeshId::new(owner, 0);
+        let mesh_b = mesh::MeshId::new(owner, 1);
+
         let m0 = crate::math::translate(&crate::math::Vec3::new(1.0, 0.0, 0.0));
         let m1 = crate::math::rotate(&crate::math::Vec3::new(0.0, 1.0, 0.0), 0.5);
+        let m2 = crate::math::translate(&crate::math::Vec3::new(-1.0, 0.0, 0.0));
         let specular0 = SpecularMaterial::default();
         let specular1 = SpecularMaterial {
             color: crate::math::Vec3::new(1.0, 1.0, 1.0),
             shininess: 64.0,
         };
+        let specular2 = SpecularMaterial {
+            color: crate::math::Vec3::new(0.5, 0.0, 0.5),
+            shininess: 8.0,
+        };
+        // mesh A, then mesh B, then mesh A again: proves each draw resolves ITS OWN object's mesh
+        // rather than reusing whatever the previous object bound.
         let objects = [
             Object {
-                mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
+                mesh: mesh_a,
                 model: m0,
                 texture: None,
                 specular: specular0,
             },
             Object {
-                mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
+                mesh: mesh_b,
                 model: m1,
                 texture: Some(crate::renderer::texture::TextureId::new(owner, 1)),
                 specular: specular1,
             },
+            Object {
+                mesh: mesh_a,
+                model: m2,
+                texture: None,
+                specular: specular2,
+            },
         ];
         assert_eq!(
-            record_objects(&objects, owner, &sets, white),
+            record_objects(&objects, owner, &meshes, &sets, white),
             vec![
+                RecordedCommand::Mesh(
+                    meshes[0].vertex_buffer.buffer,
+                    meshes[0].index_buffer.buffer
+                ),
                 RecordedCommand::Bind(white),
                 RecordedCommand::Push(
                     bytemuck::bytes_of(&ModelPushConstants {
@@ -661,7 +706,11 @@ mod tests {
                     })
                     .to_vec()
                 ),
-                RecordedCommand::Draw(36),
+                RecordedCommand::Draw(3),
+                RecordedCommand::Mesh(
+                    meshes[1].vertex_buffer.buffer,
+                    meshes[1].index_buffer.buffer
+                ),
                 RecordedCommand::Bind(sets[1]),
                 RecordedCommand::Push(
                     bytemuck::bytes_of(&ModelPushConstants {
@@ -671,7 +720,21 @@ mod tests {
                     })
                     .to_vec()
                 ),
-                RecordedCommand::Draw(36),
+                RecordedCommand::Draw(6),
+                RecordedCommand::Mesh(
+                    meshes[0].vertex_buffer.buffer,
+                    meshes[0].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Push(
+                    bytemuck::bytes_of(&ModelPushConstants {
+                        model: m2,
+                        specular_color: specular2.color,
+                        shininess: specular2.shininess,
+                    })
+                    .to_vec()
+                ),
+                RecordedCommand::Draw(3),
             ]
         );
     }

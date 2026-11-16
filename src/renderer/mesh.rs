@@ -1,8 +1,6 @@
 // Caller-facing mesh handles and the renderer-owned mesh store. See spec 015 (multiple mesh
-// resources). Not yet wired into `mod.rs`/`command.rs` — Task 4 adds the first non-test caller for
-// every item below, so each carries a temporary `#[allow(dead_code)]` until then (same pattern as
-// spec 018 Task 1's `validate_point_lights` in `light.rs`, and Task 1 of this spec's own
-// `handle::next_owner_id`/`resolve_handle`).
+// resources). Wired into `mod.rs` (`create_mesh`, the renderer's `meshes` store) and `command.rs`
+// (per-object mesh resolution/binding) as of Task 4.
 
 use super::{
     allocator::Allocator,
@@ -16,9 +14,8 @@ use ash::vk;
 /// Opaque handle to a renderer-owned mesh: an `(owner, slot)` pair identifying one entry in the
 /// renderer's mesh store. `Copy`; valid for the lifetime of the renderer that produced it. Fields
 /// are private to this module (not even `pub(super)`) — nothing outside `mesh.rs`, including the
-/// renderer itself, can construct a `MeshId` directly; Task 3/4's mesh-creation entry point is the
-/// sole constructor and will live in this module.
-#[allow(dead_code)]
+/// renderer itself, can construct a `MeshId` directly; `MeshId::new` (below) is the sole
+/// constructor, called only from `mod.rs`'s `create_mesh`.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct MeshId {
     owner: u64,
@@ -26,26 +23,35 @@ pub struct MeshId {
 }
 
 impl MeshId {
+    /// Construct a `MeshId` for a renderer's `owner` id and a slot in its mesh store. Mirrors
+    /// `texture::TextureId::new` — the sole constructor, called from `mod.rs`'s `create_mesh` (the
+    /// production path) and from this module's own tests.
+    pub(super) fn new(owner: u64, slot: usize) -> Self {
+        Self { owner, slot }
+    }
+
     /// A deliberately-invalid placeholder: `owner: 0` is never allocated by
     /// `handle::next_owner_id` (its first real id is 1), so this can never resolve against any
-    /// real renderer's store. Exists only to keep `Object` literals compiling at task boundaries
-    /// mid-migration (Tasks 3-5 of spec 015's plan) before a real `MeshId` from `create_mesh` is
-    /// available at each call site — every production/example/test call site that still
-    /// constructs this past Task 5 is a bug, not a valid use.
-    ///
-    /// **Visibility note:** `pub`, not `pub(crate)` — `examples/cube.rs` compiles as a separate
-    /// binary crate (examples never get `pub(crate)` access to the library crate, regardless of
-    /// re-export path), and Task 3/4 need it there too. This is a temporary, intentional crack in
-    /// an otherwise fully-private handle type; Task 4 re-tightens it to `pub(crate)` once
-    /// `cube.rs` no longer references it (its last external use).
+    /// real renderer's store. Exists only for same-crate test code (`headless.rs`, until Task 5)
+    /// that still needs an `Object` literal's `mesh` field filled in without a real renderer to
+    /// call `create_mesh` on — every production/example call site that constructs this is a bug,
+    /// not a valid use. `pub(crate)`: `examples/cube.rs` (the last external user) was migrated off
+    /// this in Task 4, so the temporary public-API crack that required `pub` visibility is closed.
+    /// `#[cfg(test)]`: with `cube.rs` migrated, `headless.rs` is its only remaining reader, and that
+    /// module is itself `#[cfg(test)]`-only — without the same gate here, a non-test build would see
+    /// this as dead code.
+    // Task 4 (Step 11) migrated headless.rs's own Object literals off this placeholder onto
+    // `HeadlessRenderer::mesh()`, so nothing in the crate references it right now — a temporary,
+    // clearly-labeled allow, same convention as spec 018's Task 1. Task 5 may give it a new reader
+    // (a no-mesh scenario test); if it still has none after that task, remove it then.
+    #[cfg(test)]
     #[allow(dead_code)]
-    pub const UNASSIGNED: MeshId = MeshId { owner: 0, slot: 0 };
+    pub(crate) const UNASSIGNED: MeshId = MeshId { owner: 0, slot: 0 };
 }
 
 /// Checked `usize -> u32` conversion for a vertex/index count. GPU buffer lengths (`Buffer::len`)
 /// and draw-call counts are `u32`; this rejects a count that wouldn't survive that conversion
 /// instead of silently truncating it.
-#[allow(dead_code)]
 fn checked_count(len: usize) -> Result<u32> {
     u32::try_from(len)
         .map_err(|_| VulkanError::ValidationError("mesh vertex/index count exceeds u32".into()))
@@ -56,7 +62,6 @@ fn checked_count(len: usize) -> Result<u32> {
 /// address a real vertex (an index equal to `vertices.len()` is one past the end and is rejected,
 /// not silently clamped), and both counts must survive the `u32` conversion GPU buffer lengths and
 /// draw calls use.
-#[allow(dead_code)]
 pub(crate) fn validate_mesh_input(vertices: &[Vertex], indices: &[Index]) -> Result<()> {
     if vertices.is_empty() {
         return Err(VulkanError::ValidationError("mesh has no vertices".into()));
@@ -87,7 +92,6 @@ pub(crate) fn validate_mesh_input(vertices: &[Vertex], indices: &[Index]) -> Res
 /// before the `Allocator` is torn down (mirrors `buffer::Buffer`/`texture::StoredTexture`). Fields
 /// are `pub(super)` (not just private) because Task 4's command recording, a sibling module of
 /// `mesh`, needs the raw buffers and index count to bind/draw.
-#[allow(dead_code)]
 pub(crate) struct StoredMesh {
     pub(super) vertex_buffer: Buffer,
     pub(super) index_buffer: Buffer,
@@ -98,7 +102,6 @@ impl StoredMesh {
     /// Destroy both buffers and return their allocations to `allocator`. Must run before the
     /// `Allocator` is torn down. Signature/consuming-`self` shape mirrors
     /// `texture::StoredTexture::destroy`.
-    #[allow(dead_code)]
     pub(super) fn destroy(self, device: &VulkanDevice, allocator: &mut Allocator) {
         self.vertex_buffer.destroy(device, allocator);
         self.index_buffer.destroy(device, allocator);
@@ -109,7 +112,6 @@ impl StoredMesh {
 /// Validates the input first (`validate_mesh_input`) so no GPU work happens on malformed geometry.
 /// Mirrors `texture::StoredTexture::new`'s two-resource rollback: if the index buffer upload fails,
 /// the vertex buffer is destroyed before returning the error.
-#[allow(dead_code)]
 pub(crate) fn upload_mesh(
     device: &VulkanDevice,
     allocator: &mut Allocator,
@@ -148,7 +150,6 @@ pub(crate) fn upload_mesh(
 /// store), using the shared `handle::resolve_handle` identity check. Returns `ValidationError` — not
 /// a silent fallback — on a mismatched owner or an out-of-range slot; there is no sensible default
 /// mesh.
-#[allow(dead_code)]
 pub(crate) fn resolve_mesh(id: MeshId, owner: u64, store: &[StoredMesh]) -> Result<&StoredMesh> {
     match handle::resolve_handle(id.owner, id.slot, owner, store.len()) {
         Some(slot) => Ok(&store[slot]),

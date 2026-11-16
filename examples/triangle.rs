@@ -49,12 +49,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let indices: [Index; 3] = [0, 1, 2];
 
-    let mut renderer = VulkanRenderer::with_window(
-        Arc::clone(&window),
-        (size.width, size.height),
-        &vertices,
-        &indices,
-    )?;
+    let mut renderer = VulkanRenderer::with_window(Arc::clone(&window), (size.width, size.height))?;
+    let mesh = renderer.create_mesh(&vertices, &indices)?;
 
     log::info!("Starting render loop...");
     event_loop.run(move |event, elwt| {
@@ -95,6 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let proj = perspective(to_radians(45.0), aspect, 0.1, 10.0);
 
                 if let Err(e) = renderer.render_frame(
+                    mesh,
                     model,
                     Camera {
                         view,

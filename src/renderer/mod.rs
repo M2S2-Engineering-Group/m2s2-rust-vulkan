@@ -60,7 +60,7 @@ use texture::{validate_specular, SpecularMaterial, StoredTexture};
 /// The raw-handle constructor is `unsafe` and cannot be called without an `unsafe` block:
 /// ```compile_fail
 /// fn make(d: m2s2_rust_vulkan::RawDisplayHandle, w: m2s2_rust_vulkan::RawWindowHandle) {
-///     let _ = m2s2_rust_vulkan::VulkanRenderer::new(d, w, (1, 1), &[], &[]);
+///     let _ = m2s2_rust_vulkan::VulkanRenderer::new(d, w, (1, 1));
 /// }
 /// ```
 pub struct VulkanRenderer {
@@ -76,14 +76,6 @@ pub struct VulkanRenderer {
     // the full destroy chain is frame_context -> pipeline -> swapchain -> device -> instance.
     pub(crate) pipeline: ManuallyDrop<pipeline::GraphicsPipeline>,
     pub(crate) frame_context: ManuallyDrop<command::FrameContext>,
-    // Caller-supplied geometry uploaded into GPU buffers, plus the allocator backing them. The
-    // buffers are NOT ManuallyDrop: freeing a gpu-allocator allocation needs `&mut Allocator`, so
-    // they're freed via explicit `destroy` in Drop, before the allocator (and the allocator before
-    // the device).
-    // Owner resources held in `Option` so `Drop`/resize can move them into their ownership-consuming
-    // `destroy(self, ..)` (a second destroy is then impossible). Always `Some` outside teardown.
-    pub(crate) vertex_buffer: Option<buffer::Buffer>,
-    pub(crate) index_buffer: Option<buffer::Buffer>,
     // Per-frame camera uniforms + descriptor sets, and the depth attachment. Like the buffers (and for
     // the same reason — freeing their allocations needs `&mut Allocator`), these are NOT
     // `ManuallyDrop`; they're torn down via explicit `destroy` in `Drop`, before the allocator.
@@ -95,8 +87,11 @@ pub struct VulkanRenderer {
     pub(crate) white_set: vk::DescriptorSet,
     pub(crate) textures: Vec<StoredTexture>,
     pub(crate) texture_sets: Vec<vk::DescriptorSet>,
-    // This renderer instance's owner id (see `handle.rs`), stamped into every `TextureId` it hands
-    // out so a handle from a different renderer is rejected rather than silently resolved.
+    // Caller-uploaded meshes (via `create_mesh`), mirroring `textures` above: freed via explicit
+    // `destroy` in `Drop` (needs `&mut Allocator`), before the allocator.
+    pub(crate) meshes: Vec<mesh::StoredMesh>,
+    // This renderer instance's owner id (see `handle.rs`), stamped into every `TextureId`/`MeshId`
+    // it hands out so a handle from a different renderer is rejected rather than silently resolved.
     owner_id: u64,
     // Per-frame light uniform (descriptor set 2) and the current directional light it uploads each
     // frame. Like `uniforms`, freed via explicit `destroy` in `Drop` before the allocator.
@@ -130,8 +125,6 @@ impl VulkanRenderer {
     pub fn with_window<W: HasWindowHandle + HasDisplayHandle + 'static>(
         window: Arc<W>,
         window_extent: (u32, u32),
-        vertices: &[buffer::Vertex],
-        indices: &[buffer::Index],
     ) -> Result<Self> {
         let display_handle = window
             .display_handle()
@@ -145,8 +138,6 @@ impl VulkanRenderer {
             display_handle,
             window_handle,
             window_extent,
-            vertices,
-            indices,
             Some(window as Arc<dyn WindowOwner>),
         )
     }
@@ -160,23 +151,14 @@ impl VulkanRenderer {
     /// (including the terminal-leak path). The caller must satisfy platform thread-affinity rules.
     /// Prefer [`VulkanRenderer::with_window`], which upholds this by construction.
     ///
-    /// `window_extent` is the surface size in physical pixels; `vertices`/`indices` are the
-    /// caller-supplied geometry, uploaded into GPU buffers this renderer owns.
+    /// `window_extent` is the surface size in physical pixels. Geometry is uploaded separately via
+    /// `create_mesh` once the renderer exists.
     pub unsafe fn new(
         display_handle: RawDisplayHandle,
         window_handle: RawWindowHandle,
         window_extent: (u32, u32),
-        vertices: &[buffer::Vertex],
-        indices: &[buffer::Index],
     ) -> Result<Self> {
-        Self::init(
-            display_handle,
-            window_handle,
-            window_extent,
-            vertices,
-            indices,
-            None,
-        )
+        Self::init(display_handle, window_handle, window_extent, None)
     }
 
     /// Shared construction. `window` is the retained owner for the safe path (`None` for raw handles).
@@ -184,8 +166,6 @@ impl VulkanRenderer {
         display_handle: RawDisplayHandle,
         window_handle: RawWindowHandle,
         window_extent: (u32, u32),
-        vertices: &[buffer::Vertex],
-        indices: &[buffer::Index],
         window: Option<Arc<dyn WindowOwner>>,
     ) -> Result<Self> {
         log::info!("Initializing Vulkan renderer");
@@ -200,29 +180,15 @@ impl VulkanRenderer {
             window_extent,
         )?;
 
-        // Allocator, then the two device-local buffers uploaded from the caller's geometry.
+        // Allocator for the depth/uniform/texture/light resources below; caller geometry is uploaded
+        // separately via `create_mesh` once the renderer exists.
         let mut allocator = allocator::Allocator::new(&instance, &device)?;
-        let mut vertex_buffer = None;
-        let mut index_buffer = None;
         let mut depth = None;
         let mut uniforms = None;
         let mut texture_set_layout = None;
         let mut white_texture = None;
         let mut light = None;
         let resources = (|| {
-            vertex_buffer = Some(buffer::Buffer::new_device_local(
-                &device,
-                &mut allocator,
-                vertices,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-            )?);
-            index_buffer = Some(buffer::Buffer::new_device_local(
-                &device,
-                &mut allocator,
-                indices,
-                vk::BufferUsageFlags::INDEX_BUFFER,
-            )?);
-
             // Depth attachment (swapchain-sized) and per-frame camera uniforms. The uniforms' descriptor-set
             // layout must exist before the pipeline, which references it in its pipeline layout.
             depth = Some(depth::DepthResources::new(
@@ -278,17 +244,9 @@ impl VulkanRenderer {
                 if let Some(resource) = depth.take() {
                     resource.destroy(&device, &mut allocator);
                 }
-                if let Some(resource) = index_buffer.take() {
-                    resource.destroy(&device, &mut allocator);
-                }
-                if let Some(resource) = vertex_buffer.take() {
-                    resource.destroy(&device, &mut allocator);
-                }
                 return Err(error);
             }
         };
-        let vertex_buffer = vertex_buffer.unwrap();
-        let index_buffer = index_buffer.unwrap();
         let depth = depth.unwrap();
         let uniforms = uniforms.unwrap();
         let texture_set_layout = texture_set_layout.unwrap();
@@ -311,8 +269,6 @@ impl VulkanRenderer {
             swapchain: ManuallyDrop::new(swapchain),
             pipeline: ManuallyDrop::new(pipeline),
             frame_context: ManuallyDrop::new(frame_context),
-            vertex_buffer: Some(vertex_buffer),
-            index_buffer: Some(index_buffer),
             uniforms: Some(uniforms),
             depth: Some(depth),
             texture_set_layout,
@@ -320,6 +276,7 @@ impl VulkanRenderer {
             white_set,
             textures: Vec::new(),
             texture_sets: Vec::new(),
+            meshes: Vec::new(),
             owner_id: handle::next_owner_id(),
             light: Some(light),
             directional_light: DirectionalLight::default(),
@@ -384,14 +341,19 @@ impl VulkanRenderer {
         result
     }
 
-    /// Draw one frame of the caller-supplied geometry under the given transform. `model` is the
-    /// object's world-space transform (what the caller's simulation produces); `camera` carries the
-    /// view/projection matrices plus world-space eye position — the renderer combines model/view/proj
-    /// as `proj * view * model` in the vertex shader.
-    pub fn render_frame(&mut self, model: Mat4, camera: uniform::Camera) -> Result<()> {
+    /// Draw one frame of `mesh` under the given transform. `model` is the object's world-space
+    /// transform (what the caller's simulation produces); `camera` carries the view/projection
+    /// matrices plus world-space eye position — the renderer combines model/view/proj as
+    /// `proj * view * model` in the vertex shader.
+    pub fn render_frame(
+        &mut self,
+        mesh: mesh::MeshId,
+        model: Mat4,
+        camera: uniform::Camera,
+    ) -> Result<()> {
         self.render_objects(
             &[Object {
-                mesh: mesh::MeshId::UNASSIGNED,
+                mesh,
                 model,
                 texture: None,
                 specular: SpecularMaterial::default(),
@@ -419,6 +381,13 @@ impl VulkanRenderer {
         uniform::validate_camera(&camera)?;
         for object in objects {
             validate_specular(&object.specular)?;
+            mesh::resolve_mesh(object.mesh, self.owner_id, &self.meshes)?;
+            texture::resolve_texture_set(
+                object.texture,
+                self.owner_id,
+                &self.texture_sets,
+                self.white_set,
+            )?;
         }
         if let Some((width, height)) = self.pending_resize {
             if width == 0 || height == 0 {
@@ -489,14 +458,13 @@ impl VulkanRenderer {
             &self.swapchain,
             self.depth.as_ref().unwrap(),
             self.uniforms.as_mut().unwrap(),
-            self.vertex_buffer.as_ref().unwrap(),
-            self.index_buffer.as_ref().unwrap(),
             &camera_uniforms,
             self.light.as_mut().unwrap(),
             &self.directional_light,
             &self.point_lights,
             objects,
             self.owner_id,
+            &self.meshes,
             &self.texture_sets,
             self.white_set,
             self.text_renderer.as_mut(),
@@ -505,8 +473,13 @@ impl VulkanRenderer {
         let outcome = self.guard(outcome)?;
         if outcome.submitted() {
             self.scene_draw_calls = objects.len();
-            self.submitted_indices =
-                objects.len() as u64 * u64::from(self.index_buffer.as_ref().unwrap().len());
+            // Each object's own resolved mesh contributes its index count; already proven valid by
+            // the up-front validation pass above, so `resolve_mesh` cannot fail here.
+            self.submitted_indices = objects.iter().fold(0u64, |total, object| {
+                let resolved = mesh::resolve_mesh(object.mesh, self.owner_id, &self.meshes)
+                    .expect("object handles were validated above, before submission");
+                total.saturating_add(u64::from(resolved.index_count))
+            });
         }
         match outcome {
             command::FrameOutcome::Rendered => {}
@@ -570,6 +543,21 @@ impl VulkanRenderer {
         self.textures.push(stored);
         Ok(id)
     }
+
+    /// Upload `vertices`/`indices` into a new renderer-owned mesh, returning its handle. The mesh is
+    /// freed when the renderer drops.
+    pub fn create_mesh(
+        &mut self,
+        vertices: &[buffer::Vertex],
+        indices: &[buffer::Index],
+    ) -> Result<mesh::MeshId> {
+        self.ensure_not_terminal()?;
+        let stored = mesh::upload_mesh(&self.device, &mut self.allocator, vertices, indices);
+        let stored = self.guard(stored)?;
+        let id = mesh::MeshId::new(self.owner_id, self.meshes.len());
+        self.meshes.push(stored);
+        Ok(id)
+    }
 }
 
 impl Drop for VulkanRenderer {
@@ -585,11 +573,10 @@ impl Drop for VulkanRenderer {
             std::mem::forget(self.uniforms.take());
             std::mem::forget(self.light.take());
             std::mem::forget(self.depth.take());
-            std::mem::forget(self.vertex_buffer.take());
-            std::mem::forget(self.index_buffer.take());
             std::mem::forget(self.white_texture.take());
             std::mem::forget(self.text_renderer.take());
             std::mem::forget(std::mem::take(&mut self.textures));
+            std::mem::forget(std::mem::take(&mut self.meshes));
             std::mem::forget(self._window.take());
             // The `ManuallyDrop` owners (instance/device/swapchain/pipeline/frame_context/allocator)
             // are intentionally never dropped here, so they leak too.
@@ -613,7 +600,7 @@ impl Drop for VulkanRenderer {
             // Pipeline before uniforms: its pipeline layout references the descriptor-set layout
             // that `uniforms` owns and destroys.
             ManuallyDrop::drop(&mut self.pipeline);
-            // Free everything allocator-backed (uniforms' buffers, depth image, vertex/index
+            // Free everything allocator-backed (uniforms' buffers, depth image, mesh/texture
             // buffers) before dropping the allocator -- every allocation must outlive neither the
             // allocator nor the device it was built from. Each owner is moved out of its `Option`
             // and consumed exactly once.
@@ -626,11 +613,8 @@ impl Drop for VulkanRenderer {
             if let Some(depth) = self.depth.take() {
                 depth.destroy(&self.device, &mut self.allocator);
             }
-            if let Some(vertex_buffer) = self.vertex_buffer.take() {
-                vertex_buffer.destroy(&self.device, &mut self.allocator);
-            }
-            if let Some(index_buffer) = self.index_buffer.take() {
-                index_buffer.destroy(&self.device, &mut self.allocator);
+            for mesh in std::mem::take(&mut self.meshes) {
+                mesh.destroy(&self.device, &mut self.allocator);
             }
             for texture in std::mem::take(&mut self.textures) {
                 texture.destroy(&self.device, &mut self.allocator);

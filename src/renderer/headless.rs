@@ -8,8 +8,10 @@ use crate::renderer::buffer::{Buffer, Index, Vertex};
 use crate::renderer::command::{self, ObjectCommand};
 use crate::renderer::depth::DepthResources;
 use crate::renderer::device::VulkanDevice;
+use crate::renderer::handle;
 use crate::renderer::instance::VulkanInstance;
 use crate::renderer::light::{DirectionalLight, Light, PointLight};
+use crate::renderer::mesh::{self, MeshId, StoredMesh};
 use crate::renderer::pipeline::{self, GraphicsPipeline};
 use crate::renderer::scene::Object;
 use crate::renderer::submission::{SubmitState, SubmitStep};
@@ -223,8 +225,11 @@ pub(crate) struct HeadlessRenderer {
     device: ManuallyDrop<VulkanDevice>,
     instance: ManuallyDrop<VulkanInstance>,
     allocator: ManuallyDrop<Allocator>,
-    vertex_buffer: Option<Buffer>,
-    index_buffer: Option<Buffer>,
+    // The single mesh uploaded at construction (see `new`), mirroring `VulkanRenderer`'s own
+    // `meshes`/`owner_id` pair so `command::emit_object_draws`'s per-object resolution works
+    // identically against either renderer.
+    meshes: Vec<StoredMesh>,
+    owner: u64,
     depth: Option<DepthResources>,
     uniforms: Option<Uniforms>,
     texture_set_layout: vk::DescriptorSetLayout,
@@ -248,8 +253,7 @@ impl HeadlessRenderer {
             height: extent.1,
         };
 
-        let mut vertex_buffer = None;
-        let mut index_buffer = None;
+        let mut mesh = None;
         let mut depth = None;
         let mut uniforms = None;
         let mut texture_set_layout = None;
@@ -257,17 +261,11 @@ impl HeadlessRenderer {
         let mut light = None;
         let mut target = None;
         let resources = (|| {
-            vertex_buffer = Some(Buffer::new_device_local(
+            mesh = Some(mesh::upload_mesh(
                 &device,
                 &mut allocator,
                 vertices,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-            )?);
-            index_buffer = Some(Buffer::new_device_local(
-                &device,
-                &mut allocator,
                 indices,
-                vk::BufferUsageFlags::INDEX_BUFFER,
             )?);
 
             depth = Some(DepthResources::new(
@@ -334,10 +332,7 @@ impl HeadlessRenderer {
                 if let Some(resource) = depth.take() {
                     resource.destroy(&device, &mut allocator);
                 }
-                if let Some(resource) = index_buffer.take() {
-                    resource.destroy(&device, &mut allocator);
-                }
-                if let Some(resource) = vertex_buffer.take() {
+                if let Some(resource) = mesh.take() {
                     resource.destroy(&device, &mut allocator);
                 }
                 return Err(error);
@@ -348,8 +343,8 @@ impl HeadlessRenderer {
             device: ManuallyDrop::new(device),
             instance: ManuallyDrop::new(instance),
             allocator: ManuallyDrop::new(allocator),
-            vertex_buffer,
-            index_buffer,
+            meshes: vec![mesh.expect("mesh present after successful construction")],
+            owner: handle::next_owner_id(),
             depth,
             uniforms,
             texture_set_layout: texture_set_layout.unwrap(),
@@ -555,26 +550,24 @@ impl HeadlessRenderer {
             };
             dev.cmd_set_scissor(cmd, 0, &[scissor]);
 
-            let vertex_buffer = self
-                .vertex_buffer
-                .as_ref()
-                .expect("vertex buffer present outside teardown");
-            let index_buffer = self
-                .index_buffer
-                .as_ref()
-                .expect("index buffer present outside teardown");
-            dev.cmd_bind_vertex_buffers(cmd, 0, &[vertex_buffer.buffer], &[0]);
-            dev.cmd_bind_index_buffer(cmd, index_buffer.buffer, 0, vk::IndexType::UINT16);
-
             let white_set = self
                 .white_texture
                 .as_ref()
                 .expect("white texture present outside teardown")
                 .set;
-            // `owner` is irrelevant here: every object below uses `texture: None`, which resolves to
-            // `white_set` without consulting it.
-            command::emit_object_draws(objects, index_buffer.len(), 0, &[], white_set, |command| {
-                match command {
+            // Every object below uses `texture: None`, which resolves to `white_set` regardless of
+            // `owner` — but `owner`/`self.meshes` ARE consulted to resolve each object's own mesh.
+            command::emit_object_draws(
+                objects,
+                self.owner,
+                &self.meshes,
+                &[],
+                white_set,
+                |command| match command {
+                    ObjectCommand::BindMesh(vertex_buffer, index_buffer) => {
+                        dev.cmd_bind_vertex_buffers(cmd, 0, &[vertex_buffer], &[0]);
+                        dev.cmd_bind_index_buffer(cmd, index_buffer, 0, vk::IndexType::UINT16);
+                    }
                     ObjectCommand::BindTexture(set) => dev.cmd_bind_descriptor_sets(
                         cmd,
                         vk::PipelineBindPoint::GRAPHICS,
@@ -593,8 +586,8 @@ impl HeadlessRenderer {
                     ObjectCommand::DrawIndexed(count) => {
                         dev.cmd_draw_indexed(cmd, count, 1, 0, 0, 0);
                     }
-                }
-            });
+                },
+            );
 
             dev.cmd_end_rendering(cmd);
 
@@ -702,6 +695,12 @@ impl HeadlessRenderer {
     pub(crate) fn validation_error_count(&self) -> u32 {
         self.instance.validation_error_count()
     }
+
+    /// The single mesh this renderer uploaded at construction, for test code to reference in
+    /// `Object` literals instead of the `MeshId::UNASSIGNED` placeholder.
+    pub(crate) fn mesh(&self) -> MeshId {
+        MeshId::new(self.owner, 0)
+    }
 }
 
 fn color_subresource_range() -> vk::ImageSubresourceRange {
@@ -747,11 +746,8 @@ impl Drop for HeadlessRenderer {
             if let Some(depth) = self.depth.take() {
                 depth.destroy(&self.device, &mut self.allocator);
             }
-            if let Some(index_buffer) = self.index_buffer.take() {
-                index_buffer.destroy(&self.device, &mut self.allocator);
-            }
-            if let Some(vertex_buffer) = self.vertex_buffer.take() {
-                vertex_buffer.destroy(&self.device, &mut self.allocator);
+            for mesh in std::mem::take(&mut self.meshes) {
+                mesh.destroy(&self.device, &mut self.allocator);
             }
             if let Some(target) = self.target.take() {
                 target.destroy(&self.device, &mut self.allocator);
@@ -957,7 +953,7 @@ mod tests {
             position: Vec3::new(2.0, 2.0, 2.0),
         };
         let objects = [Object {
-            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
+            mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),
@@ -995,7 +991,7 @@ mod tests {
             position: Vec3::new(2.0, 2.0, 2.0),
         };
         let objects = [Object {
-            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
+            mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),
@@ -1039,7 +1035,7 @@ mod tests {
         let mut renderer =
             HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
         let objects = [Object {
-            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
+            mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),
@@ -1075,7 +1071,7 @@ mod tests {
         let mut renderer =
             HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
         let objects = [Object {
-            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
+            mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),
@@ -1113,7 +1109,7 @@ mod tests {
         let mut renderer =
             HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
         let objects = [Object {
-            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
+            mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),
@@ -1160,7 +1156,7 @@ mod tests {
         let mut renderer =
             HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
         let objects = [Object {
-            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
+            mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),
@@ -1201,7 +1197,7 @@ mod tests {
         let mut renderer =
             HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
         let objects = [Object {
-            mesh: crate::renderer::mesh::MeshId::UNASSIGNED,
+            mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
             texture: None,
             specular: SpecularMaterial::default(),
