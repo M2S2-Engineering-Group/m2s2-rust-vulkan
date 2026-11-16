@@ -12,6 +12,7 @@ mod handle;
 pub(crate) mod headless;
 mod image;
 pub mod instance;
+pub(crate) mod instance_buffer;
 pub mod light;
 pub mod mesh;
 pub(crate) mod per_frame_uniform;

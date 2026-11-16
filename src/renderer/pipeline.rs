@@ -5,6 +5,7 @@
 use crate::error::{Result, VulkanError};
 use crate::math::Mat4;
 use crate::math::Vec3;
+use crate::math::Vec4;
 use crate::renderer::buffer::Vertex;
 use crate::renderer::device::VulkanDevice;
 use ash::vk;
@@ -24,6 +25,47 @@ pub(crate) struct ModelPushConstants {
     pub model: Mat4,
     pub specular_color: Vec3,
     pub shininess: f32,
+}
+
+/// Per-instance GPU payload for instanced draws (plan 016): one row-major `Mat4` model transform,
+/// unpacked into four separate `vec4`s (`model_row0..3`) because the GLSL side reads four distinct
+/// `vec4` instance-rate attribute locations, not one `mat4` attribute, plus the specular
+/// color/shininess packed into a fifth `vec4` (`xyz` = color, `w` = shininess). 80 bytes, offsets
+/// 0/16/32/48/64 — unlike `ModelPushConstants`, there is no scalar `shininess` tail field because it
+/// rides along in `specular.w` instead of its own slot.
+///
+/// `#[allow(dead_code)]`: no non-test caller exists yet — Task 3 of the gpu-instancing plan is the
+/// first real caller. Exercised today only by this module's `#[cfg(test)]` tests.
+#[allow(dead_code)]
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct InstanceData {
+    pub model_row0: Vec4,
+    pub model_row1: Vec4,
+    pub model_row2: Vec4,
+    pub model_row3: Vec4,
+    pub specular: Vec4,
+}
+
+impl From<(Mat4, Vec3, f32)> for InstanceData {
+    /// Extracts each row of a row-major `Mat4` as a `Vec4` via `m2s2-math`'s `Index<usize>` impl on
+    /// `Matrix4x4`, which returns row `i`'s four components as `&[f32]` (row-major storage, same
+    /// convention as `CameraUniforms`'s `row_major` GLSL qualifier) — `Vec4::from_slice` copies that
+    /// into an owned `Vec4`. `specular_color` and `shininess` pack into one `vec4` (`xyz`/`w`).
+    fn from((model, specular_color, shininess): (Mat4, Vec3, f32)) -> Self {
+        Self {
+            model_row0: Vec4::from_slice(&model[0]),
+            model_row1: Vec4::from_slice(&model[1]),
+            model_row2: Vec4::from_slice(&model[2]),
+            model_row3: Vec4::from_slice(&model[3]),
+            specular: Vec4::new(
+                specular_color[0],
+                specular_color[1],
+                specular_color[2],
+                shininess,
+            ),
+        }
+    }
 }
 
 pub(crate) const MODEL_PUSH_OFFSET: u32 = 0;
@@ -291,6 +333,37 @@ mod tests {
         assert_eq!(
             range.stage_flags,
             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT
+        );
+    }
+
+    #[test]
+    fn instance_data_matches_shader_layout() {
+        assert_eq!(std::mem::size_of::<InstanceData>(), 80);
+        assert_eq!(std::mem::offset_of!(InstanceData, model_row0), 0);
+        assert_eq!(std::mem::offset_of!(InstanceData, model_row1), 16);
+        assert_eq!(std::mem::offset_of!(InstanceData, model_row2), 32);
+        assert_eq!(std::mem::offset_of!(InstanceData, model_row3), 48);
+        assert_eq!(std::mem::offset_of!(InstanceData, specular), 64);
+    }
+
+    #[test]
+    fn instance_data_converts_rows_and_packs_specular() {
+        let model = crate::math::translate(&Vec3::new(1.0, 2.0, 3.0));
+        let specular_color = Vec3::new(0.4, 0.5, 0.6);
+        let shininess = 32.0;
+        let instance = InstanceData::from((model, specular_color, shininess));
+        assert_eq!(instance.model_row0, Vec4::from_slice(&model[0]));
+        assert_eq!(instance.model_row1, Vec4::from_slice(&model[1]));
+        assert_eq!(instance.model_row2, Vec4::from_slice(&model[2]));
+        assert_eq!(instance.model_row3, Vec4::from_slice(&model[3]));
+        assert_eq!(
+            instance.specular,
+            Vec4::new(
+                specular_color[0],
+                specular_color[1],
+                specular_color[2],
+                shininess
+            )
         );
     }
 
