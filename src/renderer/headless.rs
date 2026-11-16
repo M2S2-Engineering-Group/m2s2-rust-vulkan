@@ -10,9 +10,10 @@ use crate::renderer::depth::DepthResources;
 use crate::renderer::device::VulkanDevice;
 use crate::renderer::handle;
 use crate::renderer::instance::VulkanInstance;
+use crate::renderer::instance_buffer::InstanceBuffer;
 use crate::renderer::light::{DirectionalLight, Light, PointLight};
 use crate::renderer::mesh::{self, MeshId, StoredMesh};
-use crate::renderer::pipeline::{self, GraphicsPipeline};
+use crate::renderer::pipeline::{GraphicsPipeline, InstanceData};
 use crate::renderer::scene::Object;
 use crate::renderer::submission::{SubmitState, SubmitStep};
 use crate::renderer::text::{self, TextDraw, TextRenderer, TextVertex};
@@ -234,6 +235,7 @@ pub(crate) struct HeadlessRenderer {
     texture_set_layout: vk::DescriptorSetLayout,
     white_texture: Option<StoredTexture>,
     light: Option<Light>,
+    instance_buffer: Option<InstanceBuffer>,
     pipeline: ManuallyDrop<GraphicsPipeline>,
     target: Option<OffscreenTarget>,
     text: Option<TextRenderer>,
@@ -266,6 +268,7 @@ impl HeadlessRenderer {
         let mut texture_set_layout = None;
         let mut white_texture = None;
         let mut light = None;
+        let mut instance_buffer = None;
         let mut target = None;
         let resources = (|| {
             depth = Some(DepthResources::new(
@@ -288,6 +291,10 @@ impl HeadlessRenderer {
             )?);
 
             light = Some(Light::new(&device, &mut allocator)?);
+            // One slot: the headless renderer has no frames-in-flight concept (every render_frame
+            // is a one-shot submission that waits for its own fence), always at frame index 0 --
+            // same reasoning as its existing single-slot Uniforms/Light usage.
+            instance_buffer = Some(InstanceBuffer::new(&device, &mut allocator, 1)?);
 
             // Built before the pipeline (despite being stored in the struct after it) because the
             // pipeline needs the target's chosen color format as a construction argument.
@@ -315,6 +322,9 @@ impl HeadlessRenderer {
             Ok(pipeline) => pipeline,
             Err(error) => {
                 if let Some(resource) = target.take() {
+                    resource.destroy(&device, &mut allocator);
+                }
+                if let Some(resource) = instance_buffer.take() {
                     resource.destroy(&device, &mut allocator);
                 }
                 if let Some(resource) = light.take() {
@@ -347,6 +357,7 @@ impl HeadlessRenderer {
             texture_set_layout: texture_set_layout.unwrap(),
             white_texture,
             light,
+            instance_buffer,
             pipeline: ManuallyDrop::new(pipeline),
             target,
             text: None,
@@ -426,6 +437,23 @@ impl HeadlessRenderer {
             .as_mut()
             .expect("light present outside teardown")
             .update(0, directional_light, point_lights)?;
+        // One InstanceData per object, in input order, written to slot 0 (the only slot a
+        // one-shot headless renderer has) -- see command.rs's draw_frame for the equivalent
+        // per-frame-in-flight version this mirrors.
+        let instances: Vec<InstanceData> = objects
+            .iter()
+            .map(|object| {
+                InstanceData::from((
+                    object.model,
+                    object.specular.color,
+                    object.specular.shininess,
+                ))
+            })
+            .collect();
+        self.instance_buffer
+            .as_mut()
+            .expect("instance buffer present outside teardown")
+            .write(0, &instances)?;
 
         let dev = &self.device.device;
 
@@ -604,6 +632,11 @@ impl HeadlessRenderer {
                 .as_ref()
                 .expect("white texture present outside teardown")
                 .set;
+            let instance_buffer_handle = self
+                .instance_buffer
+                .as_ref()
+                .expect("instance buffer present outside teardown")
+                .buffer(0);
             // Every object below uses `texture: None`, which resolves to `white_set` regardless of
             // `owner` — but `owner`/`self.meshes` ARE consulted to resolve each object's own mesh.
             command::emit_object_draws(
@@ -612,7 +645,11 @@ impl HeadlessRenderer {
                 &self.meshes,
                 &[],
                 white_set,
+                instance_buffer_handle,
                 |command| match command {
+                    ObjectCommand::BindInstanceBuffer(buffer) => {
+                        dev.cmd_bind_vertex_buffers(cmd, 1, &[buffer], &[0]);
+                    }
                     ObjectCommand::BindMesh(vertex_buffer, index_buffer) => {
                         dev.cmd_bind_vertex_buffers(cmd, 0, &[vertex_buffer], &[0]);
                         dev.cmd_bind_index_buffer(cmd, index_buffer, 0, vk::IndexType::UINT16);
@@ -625,15 +662,11 @@ impl HeadlessRenderer {
                         &[set],
                         &[],
                     ),
-                    ObjectCommand::PushModel(bytes) => dev.cmd_push_constants(
-                        cmd,
-                        pipeline_layout,
-                        pipeline::MODEL_PUSH_STAGES,
-                        pipeline::MODEL_PUSH_OFFSET,
-                        bytes,
-                    ),
-                    ObjectCommand::DrawIndexed(count) => {
-                        dev.cmd_draw_indexed(cmd, count, 1, 0, 0, 0);
+                    ObjectCommand::DrawIndexed {
+                        index_count,
+                        first_instance,
+                    } => {
+                        dev.cmd_draw_indexed(cmd, index_count, 1, 0, 0, first_instance);
                     }
                 },
             );
@@ -805,6 +838,7 @@ impl Drop for HeadlessRenderer {
             // Native parents are ManuallyDrop; retain every dependent allocation too.
             std::mem::forget(self.uniforms.take());
             std::mem::forget(self.light.take());
+            std::mem::forget(self.instance_buffer.take());
             std::mem::forget(self.depth.take());
             std::mem::forget(self.white_texture.take());
             std::mem::forget(self.target.take());
@@ -821,6 +855,9 @@ impl Drop for HeadlessRenderer {
             ManuallyDrop::drop(&mut self.pipeline);
             if let Some(light) = self.light.take() {
                 light.destroy(&self.device, &mut self.allocator);
+            }
+            if let Some(instance_buffer) = self.instance_buffer.take() {
+                instance_buffer.destroy(&self.device, &mut self.allocator);
             }
             if let Some(white_texture) = self.white_texture.take() {
                 white_texture.destroy(&self.device, &mut self.allocator);

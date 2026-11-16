@@ -28,6 +28,8 @@ mod upload;
 use crate::error::{Result, VulkanError};
 use crate::math::Mat4;
 use ash::vk;
+use command::FRAMES_IN_FLIGHT;
+use instance_buffer::InstanceBuffer;
 use light::{validate_point_lights, DirectionalLight, Light, PointLight};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -99,6 +101,10 @@ pub struct VulkanRenderer {
     pub(crate) light: Option<Light>,
     pub(crate) directional_light: DirectionalLight,
     pub(crate) point_lights: Vec<PointLight>,
+    // Per-frame-in-flight instance buffer (plan 016): one `InstanceData` per object, written each
+    // frame in `draw_frame` and bound once before the per-object draw loop. Like `light`/`uniforms`,
+    // freed via explicit `destroy` in `Drop` before the allocator.
+    pub(crate) instance_buffer: Option<InstanceBuffer>,
     // Terminal when a fence wait could not confirm GPU completion: the renderer then leaks its whole
     // resource graph in `Drop` and every public operation returns `VulkanError::Terminal`.
     submit_state: SubmitState,
@@ -189,6 +195,7 @@ impl VulkanRenderer {
         let mut texture_set_layout = None;
         let mut white_texture = None;
         let mut light = None;
+        let mut instance_buffer = None;
         let resources = (|| {
             // Depth attachment (swapchain-sized) and per-frame camera uniforms. The uniforms' descriptor-set
             // layout must exist before the pipeline, which references it in its pipeline layout.
@@ -212,6 +219,11 @@ impl VulkanRenderer {
             )?);
 
             light = Some(Light::new(&device, &mut allocator)?);
+            instance_buffer = Some(InstanceBuffer::new(
+                &device,
+                &mut allocator,
+                FRAMES_IN_FLIGHT,
+            )?);
 
             let pipeline = pipeline::GraphicsPipeline::new(
                 &device,
@@ -230,6 +242,9 @@ impl VulkanRenderer {
         let (pipeline, frame_context) = match resources {
             Ok(resources) => resources,
             Err(error) => {
+                if let Some(resource) = instance_buffer.take() {
+                    resource.destroy(&device, &mut allocator);
+                }
                 if let Some(resource) = light.take() {
                     resource.destroy(&device, &mut allocator);
                 }
@@ -254,6 +269,7 @@ impl VulkanRenderer {
         let white_texture = white_texture.unwrap();
         let white_set = white_texture.set;
         let light = light.unwrap();
+        let instance_buffer = instance_buffer.unwrap();
 
         let properties = unsafe {
             instance
@@ -282,6 +298,7 @@ impl VulkanRenderer {
             light: Some(light),
             directional_light: DirectionalLight::default(),
             point_lights: Vec::new(),
+            instance_buffer: Some(instance_buffer),
             submit_state: SubmitState::NotSubmitted,
             allocator: ManuallyDrop::new(allocator),
             _window: window,
@@ -463,6 +480,7 @@ impl VulkanRenderer {
             self.light.as_mut().unwrap(),
             &self.directional_light,
             &self.point_lights,
+            self.instance_buffer.as_mut().unwrap(),
             objects,
             self.owner_id,
             &self.meshes,
@@ -585,6 +603,7 @@ impl Drop for VulkanRenderer {
             );
             std::mem::forget(self.uniforms.take());
             std::mem::forget(self.light.take());
+            std::mem::forget(self.instance_buffer.take());
             std::mem::forget(self.depth.take());
             std::mem::forget(self.white_texture.take());
             std::mem::forget(self.text_renderer.take());
@@ -622,6 +641,9 @@ impl Drop for VulkanRenderer {
             }
             if let Some(light) = self.light.take() {
                 light.destroy(&self.device, &mut self.allocator);
+            }
+            if let Some(instance_buffer) = self.instance_buffer.take() {
+                instance_buffer.destroy(&self.device, &mut self.allocator);
             }
             if let Some(depth) = self.depth.take() {
                 depth.destroy(&self.device, &mut self.allocator);

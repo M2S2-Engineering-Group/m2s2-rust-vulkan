@@ -16,27 +16,11 @@ use std::io::Cursor;
 const VERTEX_SHADER: &[u8] = include_bytes!("../../shaders/triangle.vert.spv");
 const FRAGMENT_SHADER: &[u8] = include_bytes!("../../shaders/triangle.frag.spv");
 
-/// Per-draw model transform plus specular material, copied into command state before each indexed
-/// draw. `specular_color` lands at offset 64 with no gaps (`Mat4` is a clean 64-byte multiple, which
-/// already satisfies `Vec3`'s 16-byte GLSL alignment requirement).
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct ModelPushConstants {
-    pub model: Mat4,
-    pub specular_color: Vec3,
-    pub shininess: f32,
-}
-
 /// Per-instance GPU payload for instanced draws (plan 016): one row-major `Mat4` model transform,
 /// unpacked into four separate `vec4`s (`model_row0..3`) because the GLSL side reads four distinct
 /// `vec4` instance-rate attribute locations, not one `mat4` attribute, plus the specular
 /// color/shininess packed into a fifth `vec4` (`xyz` = color, `w` = shininess). 80 bytes, offsets
-/// 0/16/32/48/64 — unlike `ModelPushConstants`, there is no scalar `shininess` tail field because it
-/// rides along in `specular.w` instead of its own slot.
-///
-/// `#[allow(dead_code)]`: no non-test caller exists yet — Task 3 of the gpu-instancing plan is the
-/// first real caller. Exercised today only by this module's `#[cfg(test)]` tests.
-#[allow(dead_code)]
+/// 0/16/32/48/64.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct InstanceData {
@@ -68,27 +52,46 @@ impl From<(Mat4, Vec3, f32)> for InstanceData {
     }
 }
 
-pub(crate) const MODEL_PUSH_OFFSET: u32 = 0;
-pub(crate) const MODEL_PUSH_SIZE: u32 = std::mem::size_of::<ModelPushConstants>() as u32;
-pub(crate) const MODEL_PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
-    vk::ShaderStageFlags::VERTEX.as_raw() | vk::ShaderStageFlags::FRAGMENT.as_raw(),
-);
-
-fn model_push_range() -> vk::PushConstantRange {
-    vk::PushConstantRange::default()
-        .offset(MODEL_PUSH_OFFSET)
-        .size(MODEL_PUSH_SIZE)
-        .stage_flags(MODEL_PUSH_STAGES)
+/// Instance binding's five attribute descriptions (locations 4-8), offsets taken from
+/// `InstanceData`'s own field offsets via `std::mem::offset_of!` so they can't drift from the
+/// struct's field order.
+fn instance_attribute_descriptions() -> [vk::VertexInputAttributeDescription; 5] {
+    let format = vk::Format::R32G32B32A32_SFLOAT;
+    [
+        vk::VertexInputAttributeDescription::default()
+            .location(4)
+            .binding(1)
+            .format(format)
+            .offset(std::mem::offset_of!(InstanceData, model_row0) as u32),
+        vk::VertexInputAttributeDescription::default()
+            .location(5)
+            .binding(1)
+            .format(format)
+            .offset(std::mem::offset_of!(InstanceData, model_row1) as u32),
+        vk::VertexInputAttributeDescription::default()
+            .location(6)
+            .binding(1)
+            .format(format)
+            .offset(std::mem::offset_of!(InstanceData, model_row2) as u32),
+        vk::VertexInputAttributeDescription::default()
+            .location(7)
+            .binding(1)
+            .format(format)
+            .offset(std::mem::offset_of!(InstanceData, model_row3) as u32),
+        vk::VertexInputAttributeDescription::default()
+            .location(8)
+            .binding(1)
+            .format(format)
+            .offset(std::mem::offset_of!(InstanceData, specular) as u32),
+    ]
 }
 
-fn validate_push_limit(limit: u32) -> Result<()> {
-    if MODEL_PUSH_OFFSET + MODEL_PUSH_SIZE > limit {
-        return Err(VulkanError::InitializationError(format!(
-            "model push constants require {} bytes, device supports {limit}",
-            MODEL_PUSH_OFFSET + MODEL_PUSH_SIZE,
-        )));
-    }
-    Ok(())
+/// One instance binding, consumed one `InstanceData` per instance (not per vertex).
+fn instance_binding_description() -> vk::VertexInputBindingDescription {
+    vk::VertexInputBindingDescription::default()
+        .binding(1)
+        .stride(std::mem::size_of::<InstanceData>() as u32)
+        .input_rate(vk::VertexInputRate::INSTANCE)
 }
 
 pub(super) struct PipelineDescription<'a> {
@@ -124,7 +127,14 @@ impl GraphicsPipeline {
         depth_format: vk::Format,
         set_layouts: &[vk::DescriptorSetLayout],
     ) -> Result<Self> {
-        validate_push_limit(device.max_push_constants_size)?;
+        let bindings = [
+            Vertex::binding_description(),
+            instance_binding_description(),
+        ];
+        let attributes: Vec<vk::VertexInputAttributeDescription> = Vertex::attribute_descriptions()
+            .into_iter()
+            .chain(instance_attribute_descriptions())
+            .collect();
         Self::create(
             device,
             color_format,
@@ -133,12 +143,12 @@ impl GraphicsPipeline {
             PipelineDescription {
                 vertex_shader: VERTEX_SHADER,
                 fragment_shader: FRAGMENT_SHADER,
-                bindings: &[Vertex::binding_description()],
-                attributes: &Vertex::attribute_descriptions(),
+                bindings: &bindings,
+                attributes: &attributes,
                 depth_test: true,
                 cull_mode: vk::CullModeFlags::BACK,
                 blend: false,
-                push_ranges: &[model_push_range()],
+                push_ranges: &[],
             },
         )
     }
@@ -322,21 +332,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn model_payload_and_range_match_shader_layout() {
-        assert_eq!(std::mem::size_of::<ModelPushConstants>(), 80);
-        assert_eq!(std::mem::offset_of!(ModelPushConstants, model), 0);
-        assert_eq!(std::mem::offset_of!(ModelPushConstants, specular_color), 64);
-        assert_eq!(std::mem::offset_of!(ModelPushConstants, shininess), 76);
-        let range = model_push_range();
-        assert_eq!(range.offset, 0);
-        assert_eq!(range.size, 80);
-        assert_eq!(
-            range.stage_flags,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT
-        );
-    }
-
-    #[test]
     fn instance_data_matches_shader_layout() {
         assert_eq!(std::mem::size_of::<InstanceData>(), 80);
         assert_eq!(std::mem::offset_of!(InstanceData, model_row0), 0);
@@ -368,11 +363,27 @@ mod tests {
     }
 
     #[test]
-    fn push_limit_accepts_equal_or_larger_and_rejects_smaller() {
-        assert!(validate_push_limit(MODEL_PUSH_SIZE).is_ok());
-        assert!(validate_push_limit(MODEL_PUSH_SIZE + 4).is_ok());
-        assert!(validate_push_limit(MODEL_PUSH_SIZE - 4).is_err());
-        assert!(validate_push_limit(0).is_err());
+    fn instance_binding_is_binding_one_instance_rate() {
+        let b = instance_binding_description();
+        assert_eq!(b.binding, 1);
+        assert_eq!(b.stride, std::mem::size_of::<InstanceData>() as u32);
+        assert_eq!(b.input_rate, vk::VertexInputRate::INSTANCE);
+    }
+
+    #[test]
+    fn instance_attributes_occupy_locations_4_through_8_on_binding_1() {
+        let attrs = instance_attribute_descriptions();
+        assert_eq!(attrs.len(), 5);
+        for (i, attr) in attrs.iter().enumerate() {
+            assert_eq!(attr.location, 4 + i as u32);
+            assert_eq!(attr.binding, 1);
+            assert_eq!(attr.format, vk::Format::R32G32B32A32_SFLOAT);
+        }
+        assert_eq!(attrs[0].offset, 0);
+        assert_eq!(attrs[1].offset, 16);
+        assert_eq!(attrs[2].offset, 32);
+        assert_eq!(attrs[3].offset, 48);
+        assert_eq!(attrs[4].offset, 64);
     }
 
     // SPIR-V's first word is a fixed magic number; a correctly compiled .spv always starts with it.

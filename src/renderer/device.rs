@@ -18,7 +18,6 @@ const MIN_DEVICE_API_VERSION: u32 = vk::API_VERSION_1_3;
 
 pub struct VulkanDevice {
     pub physical_device: vk::PhysicalDevice,
-    pub(crate) max_push_constants_size: u32,
     pub(crate) max_uniform_buffer_range: u32,
     pub device: Device,
     pub graphics_queue: vk::Queue,
@@ -96,7 +95,6 @@ impl VulkanDevice {
                 .get_physical_device_properties(physical_device)
         }
         .limits;
-        let max_push_constants_size = limits.max_push_constants_size;
         let max_uniform_buffer_range = limits.max_uniform_buffer_range;
         let graphics_queue = unsafe { device.get_device_queue(queue_families.graphics_family, 0) };
 
@@ -104,7 +102,6 @@ impl VulkanDevice {
 
         Ok(Self {
             physical_device,
-            max_push_constants_size,
             max_uniform_buffer_range,
             device,
             graphics_queue,
@@ -394,13 +391,11 @@ impl VulkanDevice {
                 .get_physical_device_properties(physical_device)
         }
         .limits;
-        let max_push_constants_size = limits.max_push_constants_size;
         let max_uniform_buffer_range = limits.max_uniform_buffer_range;
         let graphics_queue = unsafe { device.get_device_queue(graphics_family, 0) };
 
         Ok(Self {
             physical_device,
-            max_push_constants_size,
             max_uniform_buffer_range,
             device,
             graphics_queue,

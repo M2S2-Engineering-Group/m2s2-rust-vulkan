@@ -4,6 +4,7 @@ layout(location = 0) in vec3 fragColor;
 layout(location = 1) in vec2 fragUV;
 layout(location = 2) in vec3 fragNormal;
 layout(location = 3) in vec3 fragWorldPos;
+layout(location = 4) flat in vec4 fragSpecular;
 
 layout(set = 1, binding = 0) uniform sampler2D tex;
 
@@ -39,12 +40,6 @@ layout(set = 0, binding = 0) uniform CameraUniforms {
     layout(offset = 128) vec3 position;
 } camera;
 
-// Material push-constant subset: the vertex stage's `model` member at offset 0 is not redeclared.
-layout(push_constant) uniform MaterialPushConstants {
-    layout(offset = 64) vec3 specularColor;
-    layout(offset = 76) float shininess;
-} material;
-
 layout(location = 0) out vec4 outColor;
 
 const float MIN_SAFE_LENGTH_SQUARED = 1e-12;
@@ -78,7 +73,7 @@ void main() {
     // Directional ("sun") light: Lambert diffuse + Blinn-Phong specular.
     vec3 L = normalize(-light.direction); // surface -> light
     float diff = max(dot(N, L), 0.0);
-    vec3 highlight = light.color * blinnPhongSpecular(N, L, V, material.specularColor, material.shininess);
+    vec3 highlight = light.color * blinnPhongSpecular(N, L, V, fragSpecular.rgb, fragSpecular.a);
     vec3 shaded = light.color * diff * albedo.rgb + highlight;
 
     // Point lights: inverse-square-ish falloff (t = 1 - d/range; attenuation = t^2) clamped to zero
@@ -95,7 +90,7 @@ void main() {
             vec3 pointL = toLight / d;
             float t = 1.0 - d / range;
             float attenuation = t * t;
-            vec3 pointHighlight = blinnPhongSpecular(N, pointL, V, material.specularColor, material.shininess);
+            vec3 pointHighlight = blinnPhongSpecular(N, pointL, V, fragSpecular.rgb, fragSpecular.a);
             shaded += attenuation * light.points[i].color *
                 (max(dot(N, pointL), 0.0) * albedo.rgb + pointHighlight);
         }
