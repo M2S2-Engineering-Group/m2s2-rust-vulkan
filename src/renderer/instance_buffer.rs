@@ -1,13 +1,11 @@
-// Per-frame-mapped instance buffer for GPU instancing (plan 016, Task 1). One host-visible vertex
-// buffer per slot (typically one per frame-in-flight, see `command::FRAMES_IN_FLIGHT`), each holding
+// Per-frame-mapped instance buffer for GPU instancing (plan 016). One host-visible vertex buffer per
+// slot (typically one per frame-in-flight, see `command::FRAMES_IN_FLIGHT`), each holding
 // instance-rate `InstanceData` for that frame's instanced draw(s). Unlike `PerFrameUniform` this is a
 // plain vertex buffer with no descriptor set at all, so it mirrors
 // `Buffer::new_host_visible_mapped`/`write_mapped` directly rather than reusing that machinery — see
-// `Light`/`Uniforms` for the equivalent per-frame-array-of-`Buffer` shape this follows.
-//
-// `#[allow(dead_code)]` throughout this module: no non-test caller exists yet. Task 3 of the
-// gpu-instancing plan is the first real caller. Exercised today only by this module's `#[cfg(test)]`
-// tests.
+// `Light`/`Uniforms` for the equivalent per-frame-array-of-`Buffer` shape this follows. Real callers:
+// `VulkanRenderer`/`HeadlessRenderer` own one each (`mod.rs`/`headless.rs`), and `command.rs` binds
+// the frame's buffer once per recorded frame.
 
 use crate::error::{Result, VulkanError};
 use crate::renderer::allocator::Allocator;
@@ -18,13 +16,11 @@ use ash::vk;
 
 /// Maximum number of instances one `InstanceBuffer` slot can hold in a single `write` (and the count
 /// each slot's buffer is sized for at construction).
-#[allow(dead_code)]
 pub(crate) const MAX_INSTANCES_PER_FRAME: usize = 4096;
 
 /// Rejects a `write` whose instance count would exceed `MAX_INSTANCES_PER_FRAME`, before touching any
-/// buffer. Pure so it's unit-testable without a GPU (same shape as `pipeline.rs`'s
-/// `validate_push_limit` / `buffer.rs`'s `check_mapped_write`).
-#[allow(dead_code)]
+/// buffer. Pure so it's unit-testable without a GPU (same shape as `buffer.rs`'s
+/// `check_mapped_write`).
 fn validate_instance_count(len: usize) -> Result<()> {
     if len > MAX_INSTANCES_PER_FRAME {
         return Err(VulkanError::ValidationError(format!(
@@ -38,7 +34,6 @@ fn validate_instance_count(len: usize) -> Result<()> {
 /// sized for `MAX_INSTANCES_PER_FRAME` `InstanceData` instances. Not `Drop`: freeing the allocations
 /// needs `&mut Allocator`, so call `destroy` explicitly before the `Allocator` is torn down (same
 /// contract as `buffer::Buffer`/`PerFrameUniform`).
-#[allow(dead_code)]
 pub(crate) struct InstanceBuffer {
     buffers: Vec<Buffer>,
 }
@@ -48,7 +43,6 @@ impl InstanceBuffer {
     /// `MAX_INSTANCES_PER_FRAME` `InstanceData` instances. On a mid-construction failure, every buffer
     /// built so far is destroyed before returning the error (same rollback shape as
     /// `PerFrameUniform::new`).
-    #[allow(dead_code)]
     pub(crate) fn new(
         device: &VulkanDevice,
         allocator: &mut Allocator,
@@ -79,21 +73,18 @@ impl InstanceBuffer {
     /// `MAX_INSTANCES_PER_FRAME` before touching memory. The caller must have waited on that slot's
     /// in-flight fence first, so the GPU isn't mid-read (same contract as
     /// `Uniforms::update`/`Light::update`).
-    #[allow(dead_code)]
     pub(crate) fn write(&mut self, frame: usize, data: &[InstanceData]) -> Result<()> {
         validate_instance_count(data.len())?;
         self.buffers[frame].write_mapped(bytemuck::cast_slice(data))
     }
 
     /// The raw `vk::Buffer` handle for slot `frame`, to bind as an instance-rate vertex buffer.
-    #[allow(dead_code)]
     pub(crate) fn buffer(&self, frame: usize) -> vk::Buffer {
         self.buffers[frame].buffer
     }
 
     /// Destroy every slot's buffer and return its allocation to `allocator`. Must run before the
     /// `Allocator` is dropped.
-    #[allow(dead_code)]
     pub(crate) fn destroy(self, device: &VulkanDevice, allocator: &mut Allocator) {
         for buffer in self.buffers {
             buffer.destroy(device, allocator);
