@@ -92,15 +92,54 @@ cannot establish correct instance attribute addressing or matrix reconstruction.
 
 Run all repository gates and doctests; compile/validate changed SPIR-V. Keep GPU tests opt-in.
 
+## Resolved decisions (2026-11-16)
+
+- **Contiguous batching only, `MAX_INSTANCES_PER_FRAME = 4096`:** accepted as proposed. No
+  reordering/sorting; a batch key change (resolved `MeshId` or resolved texture identity) always
+  starts a new run, so A/B/A stays three draws as required by Non-goals.
+- **Attribute locations and `RendererStats.scene_instances`:** confirmed against the actual current
+  code (grounded directly, not assumed from the draft): `shaders/triangle.vert` currently declares
+  vertex attributes at locations 0-3 (`buffer::Vertex::attribute_descriptions`) and a
+  `layout(push_constant) uniform ModelPushConstants { mat4 model; }` block;
+  `shaders/triangle.frag` currently declares a second push-constant view
+  (`MaterialPushConstants { vec3 specularColor; float shininess; }` at offsets 64/76) and has no
+  flat varying for material data. Both push-constant blocks are removed entirely. New instance
+  attributes: locations 4-7 are the four `mat4` rows (each a `vec4`, `R32G32B32A32_SFLOAT`,
+  `inputRate = INSTANCE`), location 8 is `vec4(specularColor.xyz, shininess)` — matching this
+  spec's own 80-byte instance payload layout exactly (model rows at 0/16/32/48, material at 64).
+  The vertex shader reconstructs `mat4 model = transpose(mat4(row0, row1, row2, row3));` and passes
+  material through as `flat out vec4 fragSpecular` (unchanged per-triangle, so `flat` avoids
+  interpolation entirely and matches how point/directional light data is already a uniform, not
+  varying, input). `pipeline.rs`'s `PipelineDescription` currently has a single `binding:
+  vk::VertexInputBindingDescription` field, consumed as `let binding_descriptions =
+  [description.binding];` in the one shared `Self::create` both the scene pipeline
+  (`GraphicsPipeline::new`) and the text pipeline (`text.rs`) go through — this must become
+  `bindings: &'a [vk::VertexInputBindingDescription]` (both callers wrap their existing single
+  binding in a one-element slice; only the scene pipeline's caller adds a second entry for the new
+  instance binding). `scene_instances: usize` is added to `RendererStats` (and the renderer's
+  internal equivalent field) alongside the existing `scene_draw_calls`/`submitted_indices`, counting
+  total objects submitted across all batches in a frame (not batch count, which is
+  `scene_draw_calls` itself, now counting batches instead of objects).
+- **GPU comparison fixture, tolerance, and draw-count verification:** this spec was drafted before
+  spec 019's headless rendering + golden-image test infrastructure existed. Per that spec's own
+  precedent (adopted identically by specs 018 and 015), GPU acceptance now uses
+  `HeadlessRenderer`/`assert_matches_golden` at the established default tolerance (2/255 per
+  channel) instead of an ad hoc "comparison fixture." The spec's own frame-capture request ("use a
+  frame capture to establish that one compatible run is one instanced draw") has no frame-capture
+  tooling available in this project — the draw-count reduction is instead demonstrably proven by
+  this spec's own diagnostics counters: a GPU test renders N objects sharing one mesh/texture and
+  asserts `scene_draw_calls == 1` (not `N`) while `scene_instances == N`, which is a stronger,
+  automatically-checked claim than visual frame-capture inspection would give, and uses
+  infrastructure this spec already requires building regardless (`RendererStats.scene_draw_calls`
+  reporting actual batches is explicitly in the Public API section above).
+
 ## Open questions for review
 
-- Accept contiguous batching as the only initial policy and 4096 as the explicit frame budget?
-- Confirm attribute locations and RendererStats.scene_instances before API migration.
-- Agree on the comparison fixture/tolerance and a demonstrable draw-count reduction target.
+None blocking. Everything above was a design-blocking decision; all are resolved.
 
 ## Outcome
 
-Pending review and implementation. Interface details follow the final accepted 013/015 contracts.
+Pending implementation.
 
 ## References
 
