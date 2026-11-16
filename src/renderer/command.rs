@@ -205,9 +205,9 @@ impl FrameContext {
         (|| -> Result<()> {
             uniforms.update(frame, camera)?;
             light.update(frame, directional_light, point_lights)?;
-            // One InstanceData per object, in input order, so each object's own draw can offset
-            // into this frame's buffer via firstInstance (see emit_object_draws below). Every
-            // object still gets instanceCount=1 in this task -- real batching is plan 016's Task 4.
+            // One InstanceData per object, in input order, so each run emitted by
+            // emit_object_draws below can offset into this frame's buffer via firstInstance and
+            // cover its own instanceCount of consecutive entries.
             let instances: Vec<InstanceData> = objects
                 .iter()
                 .map(|object| {
@@ -478,9 +478,17 @@ impl FrameContext {
                     ),
                     ObjectCommand::DrawIndexed {
                         index_count,
+                        instance_count,
                         first_instance,
                     } => {
-                        dev.cmd_draw_indexed(cmd, index_count, 1, 0, 0, first_instance);
+                        dev.cmd_draw_indexed(
+                            cmd,
+                            index_count,
+                            instance_count,
+                            0,
+                            0,
+                            first_instance,
+                        );
                     }
                 },
             );
@@ -526,23 +534,34 @@ pub(super) enum ObjectCommand {
     BindTexture(vk::DescriptorSet),
     DrawIndexed {
         index_count: u32,
+        instance_count: u32,
         first_instance: u32,
     },
 }
 
-/// Emit the per-frame instance-buffer bind, then each object's own bind-mesh/bind-texture/draw-
-/// indexed sequence, in submission order. `object.mesh`/`object.texture` are resolved here via
+/// Emit the per-frame instance-buffer bind, then one bind-mesh/bind-texture/draw-indexed sequence
+/// per contiguous RUN of objects that share a resolved `(MeshId, resolved-texture-identity)` key —
+/// not one per object. `object.mesh`/`object.texture` are resolved here via
 /// `mesh::resolve_mesh`/`resolve_texture_set` — both `.expect`-able because the caller
 /// (`render_objects_with_text`'s up-front validation pass) already proved every object's handles
 /// resolve against `owner`/`meshes`/`texture_sets` before any of this runs.
 ///
+/// The batch key's texture half is the RESOLVED `vk::DescriptorSet` (what `resolve_texture_set`
+/// returns), not the raw `Option<TextureId>` the object was described with. This means two objects
+/// batch together exactly when they'd bind the identical GPU descriptor set — e.g. two objects with
+/// `texture: None` both resolve to `white_set` and merge; an object with `texture: None` and one
+/// with `texture: Some(id)` do NOT merge unless `id` happens to resolve to that exact same
+/// descriptor set, even if the texture at `id` is itself all-white pixel data. Batching never
+/// inspects pixel content — only bound-resource identity — so a visual coincidence (a distinct
+/// texture that renders the same color as the white default) can never silently merge two draws
+/// that are backed by different GPU resources.
+///
 /// `instance_buffer` is the SAME buffer for every object this frame (it holds one `InstanceData`
-/// per object, written by the caller before recording) — bound once before the per-object loop,
-/// not emitted per object, the same way the camera/light descriptor sets are bound once per frame
-/// rather than once per object. Each object's draw then offsets into it via `first_instance`
-/// (its own index into `objects`); `instanceCount` is hardcoded to `1` here (plan 016's Task 4
-/// makes it real multi-instance batching). Nothing is emitted for an empty `objects` — there is
-/// nothing to bind or draw.
+/// per object, written by the caller before recording) — bound once before the per-run loop, not
+/// emitted per run, the same way the camera/light descriptor sets are bound once per frame rather
+/// than once per object. Each run's draw offsets into it via `first_instance` (the index of the
+/// run's first object in `objects`) and covers `instance_count` consecutive instances. Nothing is
+/// emitted for an empty `objects` — there is nothing to bind or draw.
 pub(super) fn emit_object_draws(
     objects: &[Object],
     owner: u64,
@@ -556,21 +575,55 @@ pub(super) fn emit_object_draws(
         return;
     }
     emit(ObjectCommand::BindInstanceBuffer(instance_buffer));
-    for (index, object) in objects.iter().enumerate() {
+
+    let resolve = |object: &Object| -> (mesh::MeshId, &StoredMesh, vk::DescriptorSet) {
         let resolved = mesh::resolve_mesh(object.mesh, owner, meshes)
             .expect("object handles were validated above, before this point was reached");
-        emit(ObjectCommand::BindMesh(
-            resolved.vertex_buffer.buffer,
-            resolved.index_buffer.buffer,
-        ));
         let set = resolve_texture_set(object.texture, owner, texture_sets, white_set)
             .expect("object handles were validated above, before this point was reached");
-        emit(ObjectCommand::BindTexture(set));
-        emit(ObjectCommand::DrawIndexed {
-            index_count: resolved.index_count,
-            first_instance: index as u32,
-        });
+        (object.mesh, resolved, set)
+    };
+
+    let mut run_start = 0usize;
+    let (mut run_mesh_id, mut run_mesh, mut run_set) = resolve(&objects[0]);
+    for (index, object) in objects.iter().enumerate().skip(1) {
+        let (mesh_id, mesh, set) = resolve(object);
+        if mesh_id != run_mesh_id || set != run_set {
+            emit_run(&mut emit, run_mesh, run_set, run_start, index - run_start);
+            run_start = index;
+            run_mesh_id = mesh_id;
+            run_mesh = mesh;
+            run_set = set;
+        }
     }
+    emit_run(
+        &mut emit,
+        run_mesh,
+        run_set,
+        run_start,
+        objects.len() - run_start,
+    );
+}
+
+/// Emit one run's bind-mesh/bind-texture/draw-indexed sequence: `length` consecutive instances
+/// starting at `first_instance`, all drawing `mesh`'s geometry with `set` bound.
+fn emit_run(
+    emit: &mut impl FnMut(ObjectCommand),
+    mesh: &StoredMesh,
+    set: vk::DescriptorSet,
+    first_instance: usize,
+    length: usize,
+) {
+    emit(ObjectCommand::BindMesh(
+        mesh.vertex_buffer.buffer,
+        mesh.index_buffer.buffer,
+    ));
+    emit(ObjectCommand::BindTexture(set));
+    emit(ObjectCommand::DrawIndexed {
+        index_count: mesh.index_count,
+        instance_count: length as u32,
+        first_instance: first_instance as u32,
+    });
 }
 
 // The image transition's source scope must chain with the acquire semaphore wait.
@@ -637,6 +690,7 @@ mod tests {
         Bind(vk::DescriptorSet),
         Draw {
             index_count: u32,
+            instance_count: u32,
             first_instance: u32,
         },
     }
@@ -680,9 +734,11 @@ mod tests {
                     ObjectCommand::BindTexture(s) => RecordedCommand::Bind(s),
                     ObjectCommand::DrawIndexed {
                         index_count,
+                        instance_count,
                         first_instance,
                     } => RecordedCommand::Draw {
                         index_count,
+                        instance_count,
                         first_instance,
                     },
                 })
@@ -763,6 +819,7 @@ mod tests {
                 RecordedCommand::Bind(white),
                 RecordedCommand::Draw {
                     index_count: 3,
+                    instance_count: 1,
                     first_instance: 0,
                 },
                 RecordedCommand::Mesh(
@@ -772,6 +829,7 @@ mod tests {
                 RecordedCommand::Bind(sets[1]),
                 RecordedCommand::Draw {
                     index_count: 6,
+                    instance_count: 1,
                     first_instance: 1,
                 },
                 RecordedCommand::Mesh(
@@ -781,7 +839,302 @@ mod tests {
                 RecordedCommand::Bind(white),
                 RecordedCommand::Draw {
                     index_count: 3,
+                    instance_count: 1,
                     first_instance: 2,
+                },
+            ]
+        );
+    }
+
+    /// Builds `count` objects all sharing `mesh` and `texture`, with distinct (but otherwise
+    /// irrelevant) transforms so each is a genuinely separate object rather than a clone.
+    fn objects_sharing(
+        mesh: mesh::MeshId,
+        texture: Option<crate::renderer::texture::TextureId>,
+        count: usize,
+    ) -> Vec<Object> {
+        (0..count)
+            .map(|i| Object {
+                mesh,
+                model: crate::math::translate(&crate::math::Vec3::new(i as f32, 0.0, 0.0)),
+                texture,
+                specular: SpecularMaterial::default(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn single_object_is_one_run_of_length_one() {
+        let white = set(0x10);
+        let owner = crate::renderer::handle::next_owner_id();
+        let meshes = [stored_mesh(0x1000, 0x1001, 3)];
+        let mesh_a = mesh::MeshId::new(owner, 0);
+        let objects = objects_sharing(mesh_a, None, 1);
+        let instance_buffer = instances(0xD0);
+        assert_eq!(
+            record_objects(&objects, owner, &meshes, &[], white, instance_buffer),
+            vec![
+                RecordedCommand::InstanceBuffer(instance_buffer),
+                RecordedCommand::Mesh(
+                    meshes[0].vertex_buffer.buffer,
+                    meshes[0].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Draw {
+                    index_count: 3,
+                    instance_count: 1,
+                    first_instance: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn all_objects_sharing_mesh_and_texture_merge_into_one_run() {
+        let white = set(0x10);
+        let owner = crate::renderer::handle::next_owner_id();
+        let meshes = [stored_mesh(0x1000, 0x1001, 3)];
+        let mesh_a = mesh::MeshId::new(owner, 0);
+        let objects = objects_sharing(mesh_a, None, 5);
+        let instance_buffer = instances(0xD0);
+        // Exactly one bind-mesh/bind-texture/draw sequence, with instance_count == objects.len(),
+        // not one per object.
+        assert_eq!(
+            record_objects(&objects, owner, &meshes, &[], white, instance_buffer),
+            vec![
+                RecordedCommand::InstanceBuffer(instance_buffer),
+                RecordedCommand::Mesh(
+                    meshes[0].vertex_buffer.buffer,
+                    meshes[0].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Draw {
+                    index_count: 3,
+                    instance_count: 5,
+                    first_instance: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn strictly_alternating_mesh_produces_one_run_per_object() {
+        let white = set(0x10);
+        let owner = crate::renderer::handle::next_owner_id();
+        let meshes = [
+            stored_mesh(0x1000, 0x1001, 3),
+            stored_mesh(0x2000, 0x2001, 6),
+        ];
+        let mesh_a = mesh::MeshId::new(owner, 0);
+        let mesh_b = mesh::MeshId::new(owner, 1);
+        let objects: Vec<Object> = [mesh_a, mesh_b, mesh_a, mesh_b]
+            .into_iter()
+            .enumerate()
+            .map(|(i, mesh)| Object {
+                mesh,
+                model: crate::math::translate(&crate::math::Vec3::new(i as f32, 0.0, 0.0)),
+                texture: None,
+                specular: SpecularMaterial::default(),
+            })
+            .collect();
+        let instance_buffer = instances(0xD0);
+        assert_eq!(
+            record_objects(&objects, owner, &meshes, &[], white, instance_buffer),
+            vec![
+                RecordedCommand::InstanceBuffer(instance_buffer),
+                RecordedCommand::Mesh(
+                    meshes[0].vertex_buffer.buffer,
+                    meshes[0].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Draw {
+                    index_count: 3,
+                    instance_count: 1,
+                    first_instance: 0,
+                },
+                RecordedCommand::Mesh(
+                    meshes[1].vertex_buffer.buffer,
+                    meshes[1].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Draw {
+                    index_count: 6,
+                    instance_count: 1,
+                    first_instance: 1,
+                },
+                RecordedCommand::Mesh(
+                    meshes[0].vertex_buffer.buffer,
+                    meshes[0].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Draw {
+                    index_count: 3,
+                    instance_count: 1,
+                    first_instance: 2,
+                },
+                RecordedCommand::Mesh(
+                    meshes[1].vertex_buffer.buffer,
+                    meshes[1].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Draw {
+                    index_count: 6,
+                    instance_count: 1,
+                    first_instance: 3,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_a_b_b_a_produces_three_runs_in_exact_order() {
+        let white = set(0x10);
+        let owner = crate::renderer::handle::next_owner_id();
+        let meshes = [
+            stored_mesh(0x1000, 0x1001, 3),
+            stored_mesh(0x2000, 0x2001, 6),
+        ];
+        let mesh_a = mesh::MeshId::new(owner, 0);
+        let mesh_b = mesh::MeshId::new(owner, 1);
+        let objects: Vec<Object> = [mesh_a, mesh_a, mesh_b, mesh_b, mesh_a]
+            .into_iter()
+            .enumerate()
+            .map(|(i, mesh)| Object {
+                mesh,
+                model: crate::math::translate(&crate::math::Vec3::new(i as f32, 0.0, 0.0)),
+                texture: None,
+                specular: SpecularMaterial::default(),
+            })
+            .collect();
+        let instance_buffer = instances(0xD0);
+        assert_eq!(
+            record_objects(&objects, owner, &meshes, &[], white, instance_buffer),
+            vec![
+                RecordedCommand::InstanceBuffer(instance_buffer),
+                // Run 1: objects[0..2), mesh A, length 2, first_instance 0.
+                RecordedCommand::Mesh(
+                    meshes[0].vertex_buffer.buffer,
+                    meshes[0].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Draw {
+                    index_count: 3,
+                    instance_count: 2,
+                    first_instance: 0,
+                },
+                // Run 2: objects[2..4), mesh B, length 2, first_instance 2.
+                RecordedCommand::Mesh(
+                    meshes[1].vertex_buffer.buffer,
+                    meshes[1].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Draw {
+                    index_count: 6,
+                    instance_count: 2,
+                    first_instance: 2,
+                },
+                // Run 3: objects[4..5), mesh A again, length 1, first_instance 4.
+                RecordedCommand::Mesh(
+                    meshes[0].vertex_buffer.buffer,
+                    meshes[0].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Draw {
+                    index_count: 3,
+                    instance_count: 1,
+                    first_instance: 4,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn batching_key_is_resolved_descriptor_set_identity_not_option_shape() {
+        let white = set(0x10);
+        let owner = crate::renderer::handle::next_owner_id();
+        let meshes = [stored_mesh(0x1000, 0x1001, 3)];
+        let mesh_a = mesh::MeshId::new(owner, 0);
+        // `sets[0]` is deliberately the SAME descriptor set as `white`; `sets[1]` is a distinct
+        // one. This is contrived (a real texture store would never alias the white default), but
+        // it isolates the rule under test: batching compares the RESOLVED `vk::DescriptorSet`,
+        // never whether the object described its texture as `None` or `Some`.
+        let sets = [white, set(0xB0)];
+        let tex_same_as_white = Some(crate::renderer::texture::TextureId::new(owner, 0));
+        let tex_distinct = Some(crate::renderer::texture::TextureId::new(owner, 1));
+
+        // `None` (-> white) and `Some(id)` that resolves to that SAME set: one run of length 2.
+        let objects = [
+            Object {
+                mesh: mesh_a,
+                model: crate::math::translate(&crate::math::Vec3::new(0.0, 0.0, 0.0)),
+                texture: None,
+                specular: SpecularMaterial::default(),
+            },
+            Object {
+                mesh: mesh_a,
+                model: crate::math::translate(&crate::math::Vec3::new(1.0, 0.0, 0.0)),
+                texture: tex_same_as_white,
+                specular: SpecularMaterial::default(),
+            },
+        ];
+        let instance_buffer = instances(0xD0);
+        assert_eq!(
+            record_objects(&objects, owner, &meshes, &sets, white, instance_buffer),
+            vec![
+                RecordedCommand::InstanceBuffer(instance_buffer),
+                RecordedCommand::Mesh(
+                    meshes[0].vertex_buffer.buffer,
+                    meshes[0].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Draw {
+                    index_count: 3,
+                    instance_count: 2,
+                    first_instance: 0,
+                },
+            ]
+        );
+
+        // `None` (-> white) and `Some(id)` that resolves to a DIFFERENT set: two separate runs,
+        // even though the distinct texture might render visually identical to white -- batching
+        // never inspects pixel content, only bound-resource identity.
+        let objects = [
+            Object {
+                mesh: mesh_a,
+                model: crate::math::translate(&crate::math::Vec3::new(0.0, 0.0, 0.0)),
+                texture: None,
+                specular: SpecularMaterial::default(),
+            },
+            Object {
+                mesh: mesh_a,
+                model: crate::math::translate(&crate::math::Vec3::new(1.0, 0.0, 0.0)),
+                texture: tex_distinct,
+                specular: SpecularMaterial::default(),
+            },
+        ];
+        assert_eq!(
+            record_objects(&objects, owner, &meshes, &sets, white, instance_buffer),
+            vec![
+                RecordedCommand::InstanceBuffer(instance_buffer),
+                RecordedCommand::Mesh(
+                    meshes[0].vertex_buffer.buffer,
+                    meshes[0].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Draw {
+                    index_count: 3,
+                    instance_count: 1,
+                    first_instance: 0,
+                },
+                RecordedCommand::Mesh(
+                    meshes[0].vertex_buffer.buffer,
+                    meshes[0].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(sets[1]),
+                RecordedCommand::Draw {
+                    index_count: 3,
+                    instance_count: 1,
+                    first_instance: 1,
                 },
             ]
         );

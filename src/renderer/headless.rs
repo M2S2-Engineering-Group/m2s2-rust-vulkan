@@ -664,9 +664,17 @@ impl HeadlessRenderer {
                     ),
                     ObjectCommand::DrawIndexed {
                         index_count,
+                        instance_count,
                         first_instance,
                     } => {
-                        dev.cmd_draw_indexed(cmd, index_count, 1, 0, 0, first_instance);
+                        dev.cmd_draw_indexed(
+                            cmd,
+                            index_count,
+                            instance_count,
+                            0,
+                            0,
+                            first_instance,
+                        );
                     }
                 },
             );

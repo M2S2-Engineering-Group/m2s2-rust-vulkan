@@ -20,6 +20,7 @@ pub struct RendererStats<'a> {
     pub image_count: usize,
     pub scene_draw_calls: usize,
     pub submitted_indices: u64,
+    pub scene_instances: usize,
     pub status: RenderStatus,
 }
 
@@ -59,10 +60,10 @@ impl Diagnostics {
             || "FPS: N/A | CPU frame: N/A".into(),
             |(fps, ms)| format!("FPS: {fps:.1} | CPU frame: {ms:.2} ms"),
         );
-        format!("Camera: ({:.2}, {:.2}, {:.2})\n{}\nGPU: {}\nSwapchain: {}x{} | {:?} | {} images\nScene: {} draws | {} indices\nState: {:?}",
+        format!("Camera: ({:.2}, {:.2}, {:.2})\n{}\nGPU: {}\nSwapchain: {}x{} | {:?} | {} images\nScene: {} draws | {} instances | {} indices\nState: {:?}",
             camera_position[0], camera_position[1], camera_position[2], timing, stats.device_name,
             stats.extent.0, stats.extent.1, stats.color_format, stats.image_count,
-            stats.scene_draw_calls, stats.submitted_indices, stats.status)
+            stats.scene_draw_calls, stats.scene_instances, stats.submitted_indices, stats.status)
     }
 }
 
@@ -101,6 +102,7 @@ mod tests {
             image_count: 3,
             scene_draw_calls: 2,
             submitted_indices: 72,
+            scene_instances: 5,
             status: RenderStatus::ResizePending,
         };
         let mut diagnostics = Diagnostics::default();
@@ -111,7 +113,7 @@ mod tests {
             "Test GPU",
             "800x600",
             "3 images",
-            "2 draws | 72 indices",
+            "2 draws | 5 instances | 72 indices",
             "ResizePending",
         ] {
             assert!(text.contains(expected));

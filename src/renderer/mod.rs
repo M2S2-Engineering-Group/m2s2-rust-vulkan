@@ -28,8 +28,8 @@ mod upload;
 use crate::error::{Result, VulkanError};
 use crate::math::Mat4;
 use ash::vk;
-use command::FRAMES_IN_FLIGHT;
-use instance_buffer::InstanceBuffer;
+use command::{ObjectCommand, FRAMES_IN_FLIGHT};
+use instance_buffer::{InstanceBuffer, MAX_INSTANCES_PER_FRAME};
 use light::{validate_point_lights, DirectionalLight, Light, PointLight};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -122,6 +122,7 @@ pub struct VulkanRenderer {
     device_name: String,
     scene_draw_calls: usize,
     submitted_indices: u64,
+    scene_instances: usize,
 }
 
 impl VulkanRenderer {
@@ -309,6 +310,7 @@ impl VulkanRenderer {
             device_name,
             scene_draw_calls: 0,
             submitted_indices: 0,
+            scene_instances: 0,
         })
     }
 
@@ -397,6 +399,7 @@ impl VulkanRenderer {
     ) -> Result<()> {
         self.ensure_not_terminal()?;
         uniform::validate_camera(&camera)?;
+        validate_object_count(objects.len())?;
         for object in objects {
             validate_specular(&object.specular)?;
             mesh::resolve_mesh(object.mesh, self.owner_id, &self.meshes)?;
@@ -491,14 +494,40 @@ impl VulkanRenderer {
         );
         let outcome = self.guard(outcome)?;
         if outcome.submitted() {
-            self.scene_draw_calls = objects.len();
-            // Each object's own resolved mesh contributes its index count; already proven valid by
-            // the up-front validation pass above, so `resolve_mesh` cannot fail here.
-            self.submitted_indices = objects.iter().fold(0u64, |total, object| {
-                let resolved = mesh::resolve_mesh(object.mesh, self.owner_id, &self.meshes)
-                    .expect("object handles were validated above, before submission");
-                total.saturating_add(u64::from(resolved.index_count))
-            });
+            // Re-walk the actual runs `emit_object_draws` grouped objects into (not a second,
+            // parallel batching implementation) to derive all three counters consistently: one
+            // draw call and index_count*instance_count indices per run, instance_count instances
+            // per run. Every object handle was already proven to resolve by the validation pass
+            // above, so this cannot fail. `vk::Buffer::null()` stands in for the instance buffer:
+            // this pass only counts commands, it never records any of them.
+            let mut draw_calls = 0usize;
+            let mut indices = 0u64;
+            let mut instances = 0usize;
+            command::emit_object_draws(
+                objects,
+                self.owner_id,
+                &self.meshes,
+                &self.texture_sets,
+                self.white_set,
+                vk::Buffer::null(),
+                |command| {
+                    if let ObjectCommand::DrawIndexed {
+                        index_count,
+                        instance_count,
+                        ..
+                    } = command
+                    {
+                        draw_calls += 1;
+                        indices = indices.saturating_add(
+                            u64::from(index_count).saturating_mul(u64::from(instance_count)),
+                        );
+                        instances = instances.saturating_add(instance_count as usize);
+                    }
+                },
+            );
+            self.scene_draw_calls = draw_calls;
+            self.submitted_indices = indices;
+            self.scene_instances = instances;
         }
         match outcome {
             command::FrameOutcome::Rendered => {}
@@ -521,6 +550,7 @@ impl VulkanRenderer {
             image_count: self.swapchain.images.len(),
             scene_draw_calls: self.scene_draw_calls,
             submitted_indices: self.submitted_indices,
+            scene_instances: self.scene_instances,
             status: match self.pending_resize {
                 Some((0, _)) | Some((_, 0)) => diagnostics::RenderStatus::Paused,
                 Some(_) => diagnostics::RenderStatus::ResizePending,
@@ -665,5 +695,39 @@ impl Drop for VulkanRenderer {
             ManuallyDrop::drop(&mut self.device);
             ManuallyDrop::drop(&mut self.instance);
         }
+    }
+}
+
+/// Rejects an `objects` slice longer than `MAX_INSTANCES_PER_FRAME` before any per-object
+/// validation, swapchain recreation, or GPU work. Pure, so it's unit-testable without a GPU (same
+/// shape as `instance_buffer::validate_instance_count`, which this mirrors) — but runs much
+/// earlier, in `render_objects_with_text`'s up-front validation pass, so an oversized frame fails
+/// with a normal `ValidationError` instead of reaching `InstanceBuffer::write` deep inside
+/// `draw_frame`, where a failure is treated as terminal.
+fn validate_object_count(len: usize) -> Result<()> {
+    if len > MAX_INSTANCES_PER_FRAME {
+        return Err(VulkanError::ValidationError(format!(
+            "frame has {len} objects, exceeds MAX_INSTANCES_PER_FRAME ({MAX_INSTANCES_PER_FRAME})"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_object_count_accepts_up_to_max() {
+        assert!(validate_object_count(0).is_ok());
+        assert!(validate_object_count(MAX_INSTANCES_PER_FRAME).is_ok());
+    }
+
+    #[test]
+    fn validate_object_count_rejects_over_max() {
+        assert!(matches!(
+            validate_object_count(MAX_INSTANCES_PER_FRAME + 1),
+            Err(VulkanError::ValidationError(_))
+        ));
     }
 }
