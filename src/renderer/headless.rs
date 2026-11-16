@@ -241,6 +241,13 @@ pub(crate) struct HeadlessRenderer {
     text: Option<TextRenderer>,
     text_vertices: Vec<TextVertex>,
     terminal: bool,
+    // Counters from the most recently *completed* `render_frame_with_text` call, re-derived by
+    // walking the same `emit_object_draws` run-grouping `VulkanRenderer::draw_frame` counts with
+    // (see `mod.rs`'s matching comment) -- not a second, parallel batching implementation. Let
+    // golden-image tests assert the real draw-count reduction instancing exists for, not just a
+    // visual match.
+    scene_draw_calls: usize,
+    scene_instances: usize,
 }
 
 impl HeadlessRenderer {
@@ -363,6 +370,8 @@ impl HeadlessRenderer {
             text: None,
             text_vertices: Vec::new(),
             terminal: false,
+            scene_draw_calls: 0,
+            scene_instances: 0,
         })
     }
 
@@ -780,6 +789,36 @@ impl HeadlessRenderer {
             .expect("target present outside teardown")
             .mark_rendered();
 
+        // Re-walk the actual runs `emit_object_draws` grouped `objects` into (not a second,
+        // parallel batching implementation) to derive both counters consistently -- mirrors
+        // `VulkanRenderer::draw_frame`'s matching comment in `mod.rs`. `vk::Buffer::null()` stands
+        // in for the instance buffer: this pass only counts commands, it never records any of
+        // them. Every object handle was already proven to resolve by the validation pass above the
+        // real recording, so this cannot fail.
+        let mut draw_calls = 0usize;
+        let mut instances = 0usize;
+        let white_set = self
+            .white_texture
+            .as_ref()
+            .expect("white texture present outside teardown")
+            .set;
+        command::emit_object_draws(
+            objects,
+            self.owner,
+            &self.meshes,
+            &[],
+            white_set,
+            vk::Buffer::null(),
+            |command| {
+                if let ObjectCommand::DrawIndexed { instance_count, .. } = command {
+                    draw_calls += 1;
+                    instances += instance_count as usize;
+                }
+            },
+        );
+        self.scene_draw_calls = draw_calls;
+        self.scene_instances = instances;
+
         Ok(pixels)
     }
 
@@ -788,6 +827,18 @@ impl HeadlessRenderer {
     /// without reaching into private fields.
     pub(crate) fn validation_error_count(&self) -> u32 {
         self.instance.validation_error_count()
+    }
+
+    /// Draw-call count from the most recently completed render: one per run of consecutive objects
+    /// sharing a resolved mesh+texture (see `command::emit_object_draws`), not one per object. Lets
+    /// tests assert the batching reduction directly instead of inferring it from pixels alone.
+    pub(crate) fn scene_draw_calls(&self) -> usize {
+        self.scene_draw_calls
+    }
+
+    /// Total object/instance count across all runs from the most recently completed render.
+    pub(crate) fn scene_instances(&self) -> usize {
+        self.scene_instances
     }
 
     /// Upload additional geometry using the production mesh uploader.
@@ -1552,5 +1603,178 @@ mod tests {
         // Restore the fixture for ordinary teardown; this is not a production recovery path.
         renderer.terminal = false;
         assert_eq!(renderer.validation_error_count(), 0);
+    }
+
+    // --- Spec 016 (GPU instancing): golden-image acceptance tests for the batched instance path ---
+
+    const MANY_INSTANCES_GRID: usize = 5;
+    const MANY_INSTANCES_COUNT: usize = MANY_INSTANCES_GRID * MANY_INSTANCES_GRID;
+    const MANY_INSTANCES_SPACING: f32 = 0.5;
+    /// Row-major index (0-based) of the one instance given a non-uniformly-scaled model matrix --
+    /// the grid center, so it's unambiguous in the golden image which cube is stretched.
+    const NON_UNIFORM_SCALE_INDEX: usize = 12;
+
+    fn many_instances_camera() -> uniform::Camera {
+        use crate::math::{look_at, perspective, to_radians, Vec3};
+        let position = Vec3::new(0.0, 3.0, 4.0);
+        uniform::Camera {
+            position,
+            view: look_at(
+                &position,
+                &Vec3::new(0.0, 0.0, 0.0),
+                &Vec3::new(0.0, 1.0, 0.0),
+            ),
+            proj: perspective(to_radians(60.0), 1.0, 0.1, 20.0),
+        }
+    }
+
+    /// `MANY_INSTANCES_COUNT` copies of `mesh` on a 5x5 grid, each with an independently different
+    /// position, Y rotation, and shininess -- proving a single batched run still carries correct
+    /// per-instance data, not a uniform cube merely repeated. One instance (the grid center) gets a
+    /// non-uniformly-scaled model matrix (per this plan's Review Focus): a batched draw's
+    /// per-instance model matrices must each light correctly on their own, not assume a shared
+    /// uniform scale baked into the pipeline.
+    fn many_instances_objects(mesh: MeshId) -> Vec<Object> {
+        use crate::math::{rotate, to_radians, translate, Mat4, Transform4x4, Vec3};
+        (0..MANY_INSTANCES_COUNT)
+            .map(|i| {
+                let col = (i % MANY_INSTANCES_GRID) as f32;
+                let row = (i / MANY_INSTANCES_GRID) as f32;
+                let x = (col - 2.0) * MANY_INSTANCES_SPACING;
+                let z = (row - 2.0) * MANY_INSTANCES_SPACING;
+                let rotation = rotate(&Vec3::new(0.0, 1.0, 0.0), to_radians(i as f32 * 15.0));
+                let scale = if i == NON_UNIFORM_SCALE_INDEX {
+                    Mat4::scale(Vec3::new(0.7, 0.15, 0.3))
+                } else {
+                    Mat4::scale(Vec3::new(0.3, 0.3, 0.3))
+                };
+                Object {
+                    mesh,
+                    model: translate(&Vec3::new(x, 0.0, z)) * rotation * scale,
+                    texture: None,
+                    specular: texture::SpecularMaterial {
+                        color: Vec3::new(0.8, 0.8, 0.8),
+                        shininess: 4.0 + ((i as f32 * 12.0) % 128.0),
+                    },
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/instanced_many.png"]
+    fn many_instances_one_mesh_single_draw_call_matches_golden() {
+        let mut renderer = HeadlessRenderer::new_empty(MULTI_MESH_EXTENT).unwrap();
+        let (vertices, indices) = lit_untextured_cube();
+        let cube = renderer.create_mesh(&vertices, &indices).unwrap();
+        let objects = many_instances_objects(cube);
+        let camera = many_instances_camera();
+        let light = DirectionalLight::default();
+        let pixels = renderer
+            .render_frame(&objects, camera, &light, &[])
+            .unwrap();
+        assert_eq!(
+            renderer.scene_draw_calls(),
+            1,
+            "{} instances of one mesh/texture must merge into a single instanced draw call",
+            MANY_INSTANCES_COUNT
+        );
+        assert_eq!(renderer.scene_instances(), MANY_INSTANCES_COUNT);
+        assert_mesh_golden(&renderer, &pixels, "instanced_many.png");
+    }
+
+    /// Translate + a fixed uniform scale-down, so six objects spread along X don't overlap --
+    /// distinct from `mesh_object` (identity scale) above, which only ever places two objects far
+    /// enough apart on its own.
+    fn mesh_run_object(mesh: MeshId, x: f32) -> Object {
+        use crate::math::{translate, Mat4, Transform4x4, Vec3};
+        Object {
+            mesh,
+            model: translate(&Vec3::new(x, 0.0, 0.0)) * Mat4::scale(Vec3::new(0.5, 0.5, 0.5)),
+            texture: None,
+            specular: texture::SpecularMaterial::default(),
+        }
+    }
+
+    fn mesh_run_camera() -> uniform::Camera {
+        use crate::math::{look_at, perspective, to_radians, Vec3};
+        let position = Vec3::new(0.0, 1.2, 5.0);
+        uniform::Camera {
+            position,
+            view: look_at(
+                &position,
+                &Vec3::new(0.0, 0.0, 0.0),
+                &Vec3::new(0.0, 1.0, 0.0),
+            ),
+            proj: perspective(to_radians(50.0), 1.0, 0.1, 20.0),
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/instanced_mixed_runs.png"]
+    fn mixed_mesh_runs_three_draw_calls_matches_golden() {
+        let mut renderer = HeadlessRenderer::new_empty(MULTI_MESH_EXTENT).unwrap();
+        let (vertices, indices) = lit_untextured_cube();
+        let cube = renderer.create_mesh(&vertices, &indices).unwrap();
+        let (vertices, indices) = triangle_mesh();
+        let triangle = renderer.create_mesh(&vertices, &indices).unwrap();
+        // Mesh A x3, mesh B x2, mesh A x1 again: three consecutive runs where the middle one is a
+        // different mesh entirely -- proves a run boundary closes and reopens correctly, not just
+        // "any two different meshes batch separately".
+        let objects = [
+            mesh_run_object(cube, -1.5),
+            mesh_run_object(cube, -0.9),
+            mesh_run_object(cube, -0.3),
+            mesh_run_object(triangle, 0.3),
+            mesh_run_object(triangle, 0.9),
+            mesh_run_object(cube, 1.5),
+        ];
+        let camera = mesh_run_camera();
+        let light = DirectionalLight::default();
+        let pixels = renderer
+            .render_frame(&objects, camera, &light, &[])
+            .unwrap();
+        assert_eq!(
+            renderer.scene_draw_calls(),
+            3,
+            "mesh A x3, mesh B x2, mesh A x1 must emit exactly three runs, not fewer or more"
+        );
+        assert_eq!(renderer.scene_instances(), objects.len());
+        assert_mesh_golden(&renderer, &pixels, "instanced_mixed_runs.png");
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/instanced_with_text.png"]
+    fn instanced_scene_with_text_matches_golden() {
+        use crate::math::{Vec2, Vec4};
+        let mut renderer = HeadlessRenderer::new_empty(MULTI_MESH_EXTENT).unwrap();
+        let (vertices, indices) = lit_untextured_cube();
+        let cube = renderer.create_mesh(&vertices, &indices).unwrap();
+        let objects = many_instances_objects(cube);
+        let camera = many_instances_camera();
+        let light = DirectionalLight::default();
+        let draws = [TextDraw {
+            text: "instanced",
+            position: Vec2::new(4.0, 4.0),
+            scale: 1.0,
+            color: Vec4::new(1.0, 1.0, 1.0, 1.0),
+        }];
+        let pixels = renderer
+            .render_frame_with_text(&objects, camera, &light, &[], &draws)
+            .unwrap();
+        assert_eq!(
+            renderer.scene_draw_calls(),
+            1,
+            "the text pass must not change the underlying instanced scene's draw-call count"
+        );
+        assert_eq!(renderer.scene_instances(), MANY_INSTANCES_COUNT);
+        let without_text = renderer
+            .render_frame(&objects, camera, &light, &[])
+            .unwrap();
+        assert_ne!(
+            pixels, without_text,
+            "text must produce visible pixels over the instanced scene"
+        );
+        assert_mesh_golden(&renderer, &pixels, "instanced_with_text.png");
     }
 }
