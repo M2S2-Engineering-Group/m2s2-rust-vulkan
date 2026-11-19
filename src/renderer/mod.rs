@@ -15,6 +15,7 @@ pub mod instance;
 pub(crate) mod instance_buffer;
 pub mod light;
 pub mod mesh;
+pub(crate) mod mip;
 pub(crate) mod per_frame_uniform;
 pub mod pipeline;
 pub mod scene;
