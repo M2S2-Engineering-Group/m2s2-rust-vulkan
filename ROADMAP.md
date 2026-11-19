@@ -55,7 +55,10 @@ What separates "a triangle renders" from "a usable rendering engine" for simple 
 - [x] **Uniform buffers & descriptor sets**: per-frame camera matrices (model transforms use push constants) via `m2s2-math` — see [specs/006](specs/006-uniforms-depth-camera.md)
 - [x] **Push constants** for small, frequently-updated per-draw data — [spec 007](specs/007-multiple-objects-and-push-constants.md)
 - [x] **Camera**: view/projection using `src/math.rs`'s existing `perspective`/`look_at` — see [specs/006](specs/006-uniforms-depth-camera.md)
-- [x] **Textures**: image loading, `VkImage`/`VkImageView` creation, layout transitions, samplers — [spec 010](specs/010-textures.md). Mipmaps deferred to a follow-up spec.
+- [x] **Textures**: image loading, `VkImage`/`VkImageView` creation, layout transitions, samplers — [spec 010](specs/010-textures.md).
+- [x] **Mipmaps**: opt-in full mip chains for RGBA8 sRGB textures (`create_texture_with_options`,
+      `Mipmaps::Generate`), GPU-blit-generated at upload time; `create_texture` (the default) is
+      unchanged single-level behavior — [spec 014](specs/014-texture-mipmaps.md).
 - [x] **Multiple draw calls**: independently transformed copies of one mesh through one pipeline — [spec 007](specs/007-multiple-objects-and-push-constants.md)
 - [x] **Basic instancing**: consecutive objects sharing a resolved mesh+texture now render via one
       instanced indexed draw instead of one draw per object — [spec 016](specs/016-gpu-instancing.md).
@@ -79,12 +82,12 @@ six core owners; upload staging leak-on-terminal) — see the spec Outcome.
 
 Completed follow-ups: [013](specs/013-specular-lighting.md) specular lighting,
 [018](specs/018-point-lighting.md) point lighting, [019](specs/019-headless-rendering-and-golden-image-tests.md)
-headless/golden tests, [015](specs/015-multiple-mesh-resources.md) multiple mesh resources, and
-[016](specs/016-gpu-instancing.md) GPU instancing.
+headless/golden tests, [015](specs/015-multiple-mesh-resources.md) multiple mesh resources,
+[016](specs/016-gpu-instancing.md) GPU instancing, and [014](specs/014-texture-mipmaps.md) texture
+mipmaps.
 
-Remaining drafts: [014](specs/014-texture-mipmaps.md) texture mipmaps and
-[017](specs/017-directional-shadow-mapping.md) directional shadows. Numbering identifies documents,
-not a mandatory execution sequence; mipmaps can proceed independently of shadows.
+Remaining drafts: [017](specs/017-directional-shadow-mapping.md) directional shadows. Numbering
+identifies documents, not a mandatory execution sequence.
 
 ## Phase 3: Scene & asset infrastructure
 

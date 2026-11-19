@@ -1,6 +1,6 @@
 # 014: Texture mipmaps
 
-**Status**: Draft for review; not implemented.
+**Status**: Implemented and verified (CPU gates, headless GPU suite, and golden-image acceptance pass).
 **Roadmap item**: [Phase 2 textures](../ROADMAP.md#phase-2-standard-rendering-features), mipmaps deferred
 by spec 010.
 **Prerequisites**: Spec 010 texture upload and the ownership/upload-failure contracts agreed in spec
@@ -218,7 +218,51 @@ results in Outcome; a passing CPU planner test does not prove the GPU mip chain 
 
 ## Outcome
 
-Pending implementation. No upload or rendering behavior is changed by this draft.
+Implemented via 5 subagent-driven tasks (plan: `docs/superpowers/plans/2026-11-19-texture-mipmaps.md`).
+
+Pure mip-extent/blit-planning (`mip_level_count`, `mip_extent`, `BlitStep`, `plan_blits`) and the
+capability accept/reject decision (`select_mip_policy`, fed by queried `vk::FormatFeatureFlags`/
+`vk::ImageFormatProperties` as plain data) landed first as CPU-only, driver-free logic in a new
+`src/renderer/mip.rs`. The real GPU wiring followed: `SampledImage`/`StoredTexture` now allocate a
+full mip chain and record the spec's exact 4-step barrier/blit/copy sequence for `Mipmaps::Generate`;
+`new_r8` (font atlas) and the white default texture keep `MipPolicy::OneLevel` hardcoded, never
+reaching `select_mip_policy`/a capability query at all, so their one-level behavior is structurally
+unaffected. Public API is exactly as specified: `Mipmaps`, `TextureOptions`, `create_texture` (a
+one-line delegation to `create_texture_with_options(..., TextureOptions::default())` — unchanged for
+every existing caller), re-exported from `lib.rs`. `HeadlessRenderer`, which had no texture-creation
+method at all before this spec, gained `create_texture`/`create_texture_with_options` mirroring
+`VulkanRenderer`'s; its draw-recording path's previously-hardcoded `&[]` texture-descriptor-sets
+argument (correct when headless could only ever produce white, found and fixed during
+implementation) now passes `&self.texture_sets`.
+
+GPU correctness — the barrier/blit/layout sequence that no CPU test can verify — was hand-traced by
+an Opus-level reviewer twice: once for the main upload path (1-level and 4-level cases, confirming
+every level ends in `SHADER_READ_ONLY_OPTIMAL` with none left in a transfer layout or
+double-transitioned) and once for the new test-only mip-content readback helper (`mip_readback.rs`,
+confirming its `srcAccess = SHADER_READ` first-barrier choice is a harmless no-op, not a bug — the
+real upload-to-readback hazard is independently covered by the upload's own barrier plus the fence
+boundary). A final whole-branch review found the two traces' layout contracts consistent at their
+seam and reported zero Critical/Important findings.
+
+GPU acceptance (run by the user on real hardware): a 16×16 four-solid-quadrant readback fixture
+proves level 1 matches its quadrant color exactly (±2/255, the project's existing golden tolerance)
+— sidestepping the sRGB-vs-linear box-filter ambiguity entirely, since averaging identical values is
+exact regardless of color space — while deeper levels get a dimension-only smoke check, per the
+spec's resolved decision. Two new golden-image scene tests
+(`mipmap_disabled_vs_generate_differ_at_far_camera_distance`,
+`mipmap_generate_at_near_camera_distance_matches_golden`) confirm `Generate` visibly changes output
+at a distance and doesn't degrade close-up sampling; `testdata/golden/mipmap_{disabled_far,
+generate_far,generate_near}.png` were generated and committed. All 10 pre-existing golden images
+were confirmed byte-identical (`git diff --quiet`) after the full re-run — zero regression from this
+spec's shared `image.rs`/`texture.rs` changes. Final counts: 118 unit tests (up from 105), 25 ignored
+GPU tests (up from 18), all passing; the cube example now demonstrates a 256×256 checker texture
+side-by-side as `Generate` vs `Disabled`, labeled via the existing text-overlay path.
+
+Minor deferred items (none load-bearing): the `Disabled` RGBA8 sampler path now gets
+`mipmap_mode: LINEAR` instead of `NEAREST` (zero observable effect at one level/`max_lod = 0`, since
+no mip selection occurs); `select_mip_policy_for` queries format properties even for
+`Mipmaps::Disabled` (harmless dead work, no capability check follows from it); `HeadlessRenderer`'s
+no-options `create_texture` has no test caller yet.
 
 ## References
 
