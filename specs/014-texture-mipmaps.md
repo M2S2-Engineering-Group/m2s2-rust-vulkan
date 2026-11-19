@@ -171,9 +171,54 @@ results in Outcome; a passing CPU planner test does not prove the GPU mip chain 
 - Accept a descriptive unsupported error with caller-directed retry, rather than a CPU fallback?
 - Choose the GPU readback fixture and filtering tolerance before implementation acceptance.
 
+## Resolved decisions (2026-11-19)
+
+- **Disabled default / explicit Generate opt-in: accepted as proposed.** `TextureOptions::default()`
+  stays `Mipmaps::Disabled`; `create_texture` keeps its existing one-level behavior unchanged;
+  `create_texture_with_options` is the only way to request `Generate`.
+- **Descriptive unsupported error, no CPU fallback: accepted as proposed.** A device that cannot
+  support the multi-level blit path for the requested extent fails `create_texture_with_options`
+  with a `VulkanError::ValidationError` (initialization-time, before any GPU submission) naming the
+  missing capability; the caller can retry with `Mipmaps::Disabled`. No image is created at a
+  different format/filtering, and no partial `TextureId`/descriptor entry is ever published.
+- **Capability query shape, grounded against the actual current code:** `VulkanDevice` does not
+  retain the `ash::Instance` after construction (confirmed by reading `device.rs`), but
+  `VulkanRenderer`/`HeadlessRenderer` already hold `instance` and `device` as sibling fields. So the
+  capability query happens at `create_texture_with_options` call time, not cached on `VulkanDevice`
+  at construction (extent/mip-count are per-texture, unlike `max_uniform_buffer_range`): call
+  `instance.instance.get_physical_device_format_properties(device.physical_device,
+  R8G8B8A8_SRGB)` for the static BLIT_SRC/BLIT_DST/SAMPLED_IMAGE_FILTER_LINEAR feature bits, and
+  `get_physical_device_image_format_properties` with the actual usage/tiling/extent/mip-level-count
+  to catch device-specific extent/mip-count limits the format-features query can't see. Both queried
+  results are plain data handed to a pure helper (`select_mip_policy` or similar, exact name pinned
+  by the plan) that decides accept/reject — unit-testable with synthetic
+  `vk::FormatFeatureFlags`/`vk::ImageFormatProperties` values, no driver required, per the spec's
+  "pure helper fed by queried properties" requirement.
+- **GPU readback fixture and tolerance:** a 16×16 synthetic RGBA8 sRGB texture with four solid 8×8
+  quadrants (distinct, fully-opaque colors, e.g. red/green/blue/white) is the readback fixture.
+  Rationale: averaging N copies of the same constant value is that same constant regardless of
+  whether the box filter operates in linear or sRGB-encoded space, so level 1 (8×8, each texel a 2×2
+  box fully inside one quadrant) has an exactly predictable expected value with no sRGB-linearization
+  ambiguity — avoiding the open question's filtering-tolerance risk entirely for that level. Assert
+  level 1 against its quadrant color at the existing golden-image default tolerance (2/255 per
+  channel, from `golden.rs`). Levels 2+ (4×4 down to 1×1) blend across quadrant boundaries, where
+  linear-vs-sRGB-space averaging genuinely differ by implementation; those levels get a loose
+  smoke check only (level exists, right dimensions, each channel within a wide band of the overall
+  four-quadrant average — tolerance pinned by the plan, not meant to validate exact filtering
+  semantics). This sidesteps needing to assert Vulkan's implementation-defined sRGB blit behavior
+  while still proving the mip chain is real GPU-generated content, not a stub. Readback itself needs
+  a new test-only helper (copy a `StoredTexture`'s image mip level to a host-visible buffer via
+  `upload::submit_once`, requiring a transition to `TRANSFER_SRC_OPTIMAL` and back) — gated the same
+  way as `headless.rs`/`golden.rs` (test-only, `#[ignore]`, needs a real driver). The existing
+  golden-image scene tests (reusing spec 019's infra) separately cover the demonstration goal:
+  render the same checker-textured geometry with `Disabled` vs `Generate` at a far camera distance
+  and confirm the two renders are not pixel-identical beyond tolerance (proving mipmapping visibly
+  changes output), plus a near-camera render confirming `Generate` doesn't visibly degrade close-up
+  sampling.
+
 ## Outcome
 
-Pending review and implementation. No upload or rendering behavior is changed by this draft.
+Pending implementation. No upload or rendering behavior is changed by this draft.
 
 ## References
 
