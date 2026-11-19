@@ -258,6 +258,13 @@ impl StoredTexture {
         unsafe { device.device.destroy_descriptor_pool(self.pool, None) };
         self.image.destroy(device, allocator);
     }
+
+    /// The raw image handle backing this texture, for test-only mip-level readback (see
+    /// `renderer::mip_readback`). `#[cfg(test)]`: no production caller needs the raw handle.
+    #[cfg(test)]
+    pub(crate) fn image(&self) -> vk::Image {
+        self.image.image()
+    }
 }
 
 /// The descriptor set bound at set 1 for an object: `white` when the object has no texture
@@ -280,6 +287,24 @@ pub(super) fn resolve_texture_set(
                 "texture id does not belong to this renderer or is out of range".into(),
             )),
         },
+    }
+}
+
+/// The raw image handle for a stored texture identified by `id`, resolved the same way
+/// `resolve_texture_set` resolves descriptor sets. Test-only plumbing for
+/// `renderer::mip_readback`'s GPU readback helper, which needs the underlying `vk::Image` (not a
+/// descriptor set) to copy a specific mip level back to the CPU.
+#[cfg(test)]
+pub(super) fn resolve_texture_image(
+    id: TextureId,
+    my_owner: u64,
+    textures: &[StoredTexture],
+) -> Result<vk::Image> {
+    match handle::resolve_handle(id.owner, id.slot, my_owner, textures.len()) {
+        Some(slot) => Ok(textures[slot].image()),
+        None => Err(VulkanError::ValidationError(
+            "texture id does not belong to this renderer or is out of range".into(),
+        )),
     }
 }
 

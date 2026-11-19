@@ -241,6 +241,14 @@ impl SampledImage {
         Ok(resource)
     }
 
+    /// The raw image handle, for test-only readback of a specific mip level (see
+    /// `renderer::mip_readback`). `#[cfg(test)]`: no production caller needs the raw handle, since
+    /// everything else goes through `view`/`sampler`.
+    #[cfg(test)]
+    pub(crate) fn image(&self) -> vk::Image {
+        self.image
+    }
+
     pub fn destroy(self, device: &VulkanDevice, allocator: &mut Allocator) {
         unsafe {
             device.device.destroy_sampler(self.sampler, None);

@@ -2,8 +2,8 @@ use m2s2_rust_vulkan::math::{
     look_at, perspective, rotate, to_radians, translate, Vec2, Vec3, Vec4,
 };
 use m2s2_rust_vulkan::{
-    init_logging, Camera, Diagnostics, DirectionalLight, Index, Object, PointLight,
-    SpecularMaterial, TextDraw, Vertex, VulkanRenderer,
+    init_logging, Camera, Diagnostics, DirectionalLight, Index, Mipmaps, Object, PointLight,
+    SpecularMaterial, TextDraw, TextureOptions, Vertex, VulkanRenderer,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -170,20 +170,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut renderer = VulkanRenderer::with_window(Arc::clone(&window), (size.width, size.height))?;
     let cube_mesh = renderer.create_mesh(&vertices, &indices)?;
 
-    // Two 2x2 RGBA8 textures: a red/white checker and a blue/green checker.
-    fn checker(a: [u8; 4], b: [u8; 4]) -> [u8; 16] {
-        let mut px = [0u8; 16];
-        for (i, color) in [a, b, b, a].into_iter().enumerate() {
-            px[i * 4..i * 4 + 4].copy_from_slice(&color);
+    // Two 256x256 RGBA8 checker textures, 4x4-texel checks (spec 014): the left cube's texture
+    // opts into mipmap generation, the right cube's doesn't. Moving the free-fly camera from near
+    // to far contrasts the two -- the mipmapped checker stays clean/filtered at a distance, while
+    // the non-mipmapped one aliases/shimmers since it always samples its full-resolution level 0.
+    const CHECKER_SIZE: u32 = 256;
+    const CHECKER_SQUARE: u32 = 4;
+    fn checker(size: u32, square: u32, a: [u8; 4], b: [u8; 4]) -> Vec<u8> {
+        let mut px = vec![0u8; (size * size * 4) as usize];
+        for y in 0..size {
+            for x in 0..size {
+                let color = if ((x / square) + (y / square)).is_multiple_of(2) {
+                    a
+                } else {
+                    b
+                };
+                let idx = ((y * size + x) * 4) as usize;
+                px[idx..idx + 4].copy_from_slice(&color);
+            }
         }
         px
     }
     let tex_a = renderer
-        .create_texture(&checker([255, 40, 40, 255], [255, 255, 255, 255]), 2, 2)
-        .expect("create texture A");
+        .create_texture_with_options(
+            &checker(
+                CHECKER_SIZE,
+                CHECKER_SQUARE,
+                [255, 40, 40, 255],
+                [255, 255, 255, 255],
+            ),
+            CHECKER_SIZE,
+            CHECKER_SIZE,
+            TextureOptions {
+                mipmaps: Mipmaps::Generate,
+            },
+        )
+        .expect("create texture A (mipmapped)");
     let tex_b = renderer
-        .create_texture(&checker([40, 80, 255, 255], [40, 255, 120, 255]), 2, 2)
-        .expect("create texture B");
+        .create_texture(
+            &checker(
+                CHECKER_SIZE,
+                CHECKER_SQUARE,
+                [40, 80, 255, 255],
+                [40, 255, 120, 255],
+            ),
+            CHECKER_SIZE,
+            CHECKER_SIZE,
+        )
+        .expect("create texture B (no mipmaps)");
 
     // A stationary sun, dimmed from its earlier full intensity so the point-light demo below (spec
     // 018) reads clearly. Moving the camera (WASD + arrows) reveals the lit/unlit faces from every
@@ -398,12 +432,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let proj = perspective(to_radians(45.0), aspect, 0.1, 100.0);
 
                 let diagnostic_text = diagnostics.format(&renderer.stats(), camera_position);
-                let text = [TextDraw {
-                    text: &diagnostic_text,
-                    position: Vec2::new(12.0, 12.0),
-                    scale: window.scale_factor() as f32,
-                    color: Vec4::new(1.0, 1.0, 1.0, 1.0),
-                }];
+                const MIPMAP_LABEL: &str = "Left cube: mipmapped | Right cube: no mipmaps";
+                let text = [
+                    TextDraw {
+                        text: &diagnostic_text,
+                        position: Vec2::new(12.0, 12.0),
+                        scale: window.scale_factor() as f32,
+                        color: Vec4::new(1.0, 1.0, 1.0, 1.0),
+                    },
+                    TextDraw {
+                        text: MIPMAP_LABEL,
+                        position: Vec2::new(12.0, 160.0),
+                        scale: window.scale_factor() as f32,
+                        color: Vec4::new(1.0, 1.0, 1.0, 1.0),
+                    },
+                ];
                 let text = if show_diagnostics { &text[..] } else { &[] };
                 let camera = Camera {
                     view,

@@ -927,6 +927,15 @@ impl HeadlessRenderer {
         assert!(!self.meshes.is_empty(), "no mesh was uploaded");
         MeshId::new(self.owner, 0)
     }
+
+    /// The raw `vk::Image` behind a stored texture, resolved against this renderer's identity the
+    /// same way `render_frame` resolves descriptor sets. Test-only plumbing for
+    /// `renderer::mip_readback`'s GPU readback helper (spec 014), which needs the underlying image
+    /// handle (not a descriptor set) to copy a specific mip level back to the CPU.
+    pub(crate) fn texture_image(&self, id: TextureId) -> vk::Image {
+        texture::resolve_texture_image(id, self.owner, &self.textures)
+            .expect("texture id must resolve against this renderer")
+    }
 }
 
 fn color_subresource_range() -> vk::ImageSubresourceRange {
@@ -1740,6 +1749,324 @@ mod tests {
             texture::resolve_texture_set(Some(id), renderer.owner, &renderer.texture_sets, white)
                 .expect("the returned TextureId must resolve against this renderer");
         assert_eq!(resolved, *renderer.texture_sets.last().unwrap());
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
+
+    // --- Spec 014 (texture mipmaps): GPU mip-chain readback and golden-image acceptance tests ---
+
+    /// Synthetic 16x16 RGBA8 readback fixture: four solid, fully-opaque 8x8 quadrants. Per spec
+    /// 014's "Resolved decisions", averaging N copies of the same constant value is that same
+    /// constant regardless of linear-vs-sRGB blit space, so level 1 (8x8, each texel a 2x2 box
+    /// fully inside one quadrant) has an exactly predictable expected value -- no filtering-
+    /// tolerance judgment call needed for that level.
+    fn quadrant_texture_16x16() -> Vec<u8> {
+        const SIZE: usize = 16;
+        const RED: [u8; 4] = [255, 0, 0, 255];
+        const GREEN: [u8; 4] = [0, 255, 0, 255];
+        const BLUE: [u8; 4] = [0, 0, 255, 255];
+        const WHITE: [u8; 4] = [255, 255, 255, 255];
+
+        let mut pixels = vec![0u8; SIZE * SIZE * 4];
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let color = match (x < SIZE / 2, y < SIZE / 2) {
+                    (true, true) => RED,
+                    (false, true) => GREEN,
+                    (true, false) => BLUE,
+                    (false, false) => WHITE,
+                };
+                let idx = (y * SIZE + x) * 4;
+                pixels[idx..idx + 4].copy_from_slice(&color);
+            }
+        }
+        pixels
+    }
+
+    /// Procedural checkerboard of `size`x`size` RGBA8 pixels, alternating `a`/`b` in `check_size`-
+    /// pixel squares -- high-frequency enough to visibly alias without mipmaps at a far camera
+    /// distance (spec 014's demonstration goal), used by the Disabled-vs-Generate golden tests
+    /// below. Mirrors the pattern the updated `examples/cube.rs` generates at a larger resolution.
+    fn checker_texture(size: u32, check_size: u32, a: [u8; 4], b: [u8; 4]) -> Vec<u8> {
+        let mut pixels = vec![0u8; (size * size * 4) as usize];
+        for y in 0..size {
+            for x in 0..size {
+                let color = if ((x / check_size) + (y / check_size)).is_multiple_of(2) {
+                    a
+                } else {
+                    b
+                };
+                let idx = ((y * size + x) * 4) as usize;
+                pixels[idx..idx + 4].copy_from_slice(&color);
+            }
+        }
+        pixels
+    }
+
+    /// Far camera for the checker-textured cube: distant enough that each screen pixel covers many
+    /// texels, where Disabled (always sampling level 0) aliases and Generate (sampling a coarser
+    /// level) does not.
+    fn mip_far_camera() -> uniform::Camera {
+        use crate::math::{to_radians, Vec3};
+        uniform::Camera {
+            view: crate::math::look_at(
+                &Vec3::new(8.0, 8.0, 8.0),
+                &Vec3::new(0.0, 0.0, 0.0),
+                &Vec3::new(0.0, 1.0, 0.0),
+            ),
+            proj: crate::math::perspective(to_radians(45.0), 1.0, 0.1, 100.0),
+            position: Vec3::new(8.0, 8.0, 8.0),
+        }
+    }
+
+    /// Near camera for the checker-textured cube: close enough that Generate's close-up sampling
+    /// (still dominated by level 0) should not look visibly degraded relative to Disabled.
+    fn mip_near_camera() -> uniform::Camera {
+        use crate::math::{to_radians, Vec3};
+        uniform::Camera {
+            view: crate::math::look_at(
+                &Vec3::new(1.0, 1.0, 1.0),
+                &Vec3::new(0.0, 0.0, 0.0),
+                &Vec3::new(0.0, 1.0, 0.0),
+            ),
+            proj: crate::math::perspective(to_radians(45.0), 1.0, 0.1, 10.0),
+            position: Vec3::new(1.0, 1.0, 1.0),
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver"]
+    fn generated_mip_level_1_of_quadrant_texture_matches_each_quadrant_exactly() {
+        use crate::renderer::mip_readback::read_back_mip_level;
+
+        let pixels = quadrant_texture_16x16();
+        let mut renderer = HeadlessRenderer::new_empty(MULTI_MESH_EXTENT).unwrap();
+        let id = renderer
+            .create_texture_with_options(
+                &pixels,
+                16,
+                16,
+                TextureOptions {
+                    mipmaps: texture::Mipmaps::Generate,
+                },
+            )
+            .expect("16x16 Generate request must succeed on a real device");
+        let image = renderer.texture_image(id);
+
+        // Level 1 is 8x8: each texel is an exact 2x2 box fully inside one source quadrant.
+        let level1 = read_back_mip_level(&renderer.device, &mut renderer.allocator, image, 1, 8, 8)
+            .expect("level 1 readback");
+        assert_eq!(level1.len(), 8 * 8 * 4);
+
+        const TOLERANCE: i16 = 2; // golden-image default tolerance, per golden.rs's convention
+        let texel_at = |x: usize, y: usize| -> [u8; 4] {
+            let idx = (y * 8 + x) * 4;
+            [
+                level1[idx],
+                level1[idx + 1],
+                level1[idx + 2],
+                level1[idx + 3],
+            ]
+        };
+        let assert_quadrant = |xs: std::ops::Range<usize>,
+                               ys: std::ops::Range<usize>,
+                               expected: [u8; 4]| {
+            for y in ys.clone() {
+                for x in xs.clone() {
+                    let actual = texel_at(x, y);
+                    for ch in 0..4 {
+                        let diff = (i16::from(actual[ch]) - i16::from(expected[ch])).abs();
+                        assert!(
+                            diff <= TOLERANCE,
+                            "level-1 texel ({x},{y}) channel {ch}: expected {expected:?}, got {actual:?}"
+                        );
+                    }
+                }
+            }
+        };
+        assert_quadrant(0..4, 0..4, [255, 0, 0, 255]); // top-left: red
+        assert_quadrant(4..8, 0..4, [0, 255, 0, 255]); // top-right: green
+        assert_quadrant(0..4, 4..8, [0, 0, 255, 255]); // bottom-left: blue
+        assert_quadrant(4..8, 4..8, [255, 255, 255, 255]); // bottom-right: white
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver"]
+    fn generated_mip_chain_has_expected_level_count_and_shrinking_dimensions() {
+        use crate::renderer::mip::mip_extent;
+        use crate::renderer::mip_readback::read_back_mip_level;
+
+        let pixels = quadrant_texture_16x16();
+        let mut renderer = HeadlessRenderer::new_empty(MULTI_MESH_EXTENT).unwrap();
+        let id = renderer
+            .create_texture_with_options(
+                &pixels,
+                16,
+                16,
+                TextureOptions {
+                    mipmaps: texture::Mipmaps::Generate,
+                },
+            )
+            .expect("16x16 Generate request must succeed on a real device");
+        let image = renderer.texture_image(id);
+
+        // 16x16 -> mip_level_count(16, 16) == 5: levels of 16, 8, 4, 2, 1.
+        const EXPECTED_LEVEL_COUNT: u32 = 5;
+        for level in 0..EXPECTED_LEVEL_COUNT {
+            let (w, h) = mip_extent(16, 16, level);
+            let bytes = read_back_mip_level(
+                &renderer.device,
+                &mut renderer.allocator,
+                image,
+                level,
+                w,
+                h,
+            )
+            .unwrap_or_else(|e| panic!("level {level} readback failed: {e:?}"));
+            assert_eq!(
+                bytes.len(),
+                (w * h * 4) as usize,
+                "level {level} byte length"
+            );
+        }
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/mipmap_disabled_far.png and mipmap_generate_far.png"]
+    fn mipmap_disabled_vs_generate_differ_at_far_camera_distance() {
+        use crate::math::Mat4;
+        use crate::renderer::golden::assert_matches_golden;
+        use crate::renderer::texture::SpecularMaterial;
+
+        let (vertices, indices) = lit_untextured_cube();
+        let checker = checker_texture(64, 4, [220, 40, 40, 255], [255, 255, 255, 255]);
+
+        let mut disabled_renderer =
+            HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
+        let disabled_tex = disabled_renderer
+            .create_texture_with_options(
+                &checker,
+                64,
+                64,
+                TextureOptions {
+                    mipmaps: texture::Mipmaps::Disabled,
+                },
+            )
+            .expect("disabled texture upload");
+        let disabled_objects = [Object {
+            mesh: disabled_renderer.mesh(),
+            model: Mat4::IDENTITY,
+            texture: Some(disabled_tex),
+            specular: SpecularMaterial::default(),
+        }];
+        let disabled_pixels = disabled_renderer
+            .render_frame(
+                &disabled_objects,
+                mip_far_camera(),
+                &DirectionalLight::default(),
+                &[],
+            )
+            .expect("disabled far render");
+        assert_eq!(disabled_renderer.validation_error_count(), 0);
+
+        let mut generate_renderer =
+            HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
+        let generate_tex = generate_renderer
+            .create_texture_with_options(
+                &checker,
+                64,
+                64,
+                TextureOptions {
+                    mipmaps: texture::Mipmaps::Generate,
+                },
+            )
+            .expect("generate texture upload");
+        let generate_objects = [Object {
+            mesh: generate_renderer.mesh(),
+            model: Mat4::IDENTITY,
+            texture: Some(generate_tex),
+            specular: SpecularMaterial::default(),
+        }];
+        let generate_pixels = generate_renderer
+            .render_frame(
+                &generate_objects,
+                mip_far_camera(),
+                &DirectionalLight::default(),
+                &[],
+            )
+            .expect("generate far render");
+        assert_eq!(generate_renderer.validation_error_count(), 0);
+
+        // Mipmapping must visibly change the far-distance render: the two buffers must not be
+        // within (a generous, non-golden) tolerance of each other.
+        let differs = disabled_pixels
+            .iter()
+            .zip(generate_pixels.iter())
+            .any(|(a, b)| (i16::from(*a) - i16::from(*b)).abs() > 2);
+        assert!(
+            differs,
+            "Disabled vs Generate renders must differ at a far camera distance"
+        );
+
+        let disabled_golden = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/golden/mipmap_disabled_far.png"
+        ));
+        assert_matches_golden(&disabled_pixels, 64, 64, disabled_golden, 2)
+            .expect("disabled far golden comparison");
+
+        let generate_golden = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/golden/mipmap_generate_far.png"
+        ));
+        assert_matches_golden(&generate_pixels, 64, 64, generate_golden, 2)
+            .expect("generate far golden comparison");
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; generates/compares testdata/golden/mipmap_generate_near.png"]
+    fn mipmap_generate_at_near_camera_distance_matches_golden() {
+        use crate::math::Mat4;
+        use crate::renderer::golden::assert_matches_golden;
+        use crate::renderer::texture::SpecularMaterial;
+
+        let (vertices, indices) = lit_untextured_cube();
+        let checker = checker_texture(64, 4, [220, 40, 40, 255], [255, 255, 255, 255]);
+
+        let mut renderer =
+            HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
+        let tex = renderer
+            .create_texture_with_options(
+                &checker,
+                64,
+                64,
+                TextureOptions {
+                    mipmaps: texture::Mipmaps::Generate,
+                },
+            )
+            .expect("generate texture upload");
+        let objects = [Object {
+            mesh: renderer.mesh(),
+            model: Mat4::IDENTITY,
+            texture: Some(tex),
+            specular: SpecularMaterial::default(),
+        }];
+        let pixels = renderer
+            .render_frame(
+                &objects,
+                mip_near_camera(),
+                &DirectionalLight::default(),
+                &[],
+            )
+            .expect("generate near render");
+
+        let golden_path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/golden/mipmap_generate_near.png"
+        ));
+        assert_matches_golden(&pixels, 64, 64, golden_path, 2)
+            .expect("generate near golden comparison");
         assert_eq!(renderer.validation_error_count(), 0);
     }
 

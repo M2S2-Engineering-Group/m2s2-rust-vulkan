@@ -16,6 +16,8 @@ pub(crate) mod instance_buffer;
 pub mod light;
 pub mod mesh;
 pub(crate) mod mip;
+#[cfg(test)]
+pub(crate) mod mip_readback;
 pub(crate) mod per_frame_uniform;
 pub mod pipeline;
 pub mod scene;
