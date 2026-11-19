@@ -57,7 +57,9 @@ What separates "a triangle renders" from "a usable rendering engine" for simple 
 - [x] **Camera**: view/projection using `src/math.rs`'s existing `perspective`/`look_at` — see [specs/006](specs/006-uniforms-depth-camera.md)
 - [x] **Textures**: image loading, `VkImage`/`VkImageView` creation, layout transitions, samplers — [spec 010](specs/010-textures.md). Mipmaps deferred to a follow-up spec.
 - [x] **Multiple draw calls**: independently transformed copies of one mesh through one pipeline — [spec 007](specs/007-multiple-objects-and-push-constants.md)
-- [ ] **Basic instancing**: deferred; 007 issues separate indexed draws
+- [x] **Basic instancing**: consecutive objects sharing a resolved mesh+texture now render via one
+      instanced indexed draw instead of one draw per object — [spec 016](specs/016-gpu-instancing.md).
+      Contiguous-only batching, no reordering; `MAX_INSTANCES_PER_FRAME = 4096`.
 - [x] **Text drawing and diagnostic overlay**: reusable text submissions; camera position, FPS/CPU frame interval, scene counts, device and swapchain state — [spec 008](specs/008-diagnostic-text-overlay.md). Shared sampled-R8 uploads are available; general textures remain below.
 - [x] **Basic lighting**: Phong/Blinn-Phong (ambient + diffuse + specular), normals, one or more point/
       directional lights. [Spec 011](specs/011-directional-lighting.md) implemented per-vertex normals
@@ -77,12 +79,12 @@ six core owners; upload staging leak-on-terminal) — see the spec Outcome.
 
 Completed follow-ups: [013](specs/013-specular-lighting.md) specular lighting,
 [018](specs/018-point-lighting.md) point lighting, [019](specs/019-headless-rendering-and-golden-image-tests.md)
-headless/golden tests, and [015](specs/015-multiple-mesh-resources.md) multiple mesh resources.
+headless/golden tests, [015](specs/015-multiple-mesh-resources.md) multiple mesh resources, and
+[016](specs/016-gpu-instancing.md) GPU instancing.
 
-Remaining drafts: [014](specs/014-texture-mipmaps.md) texture mipmaps,
-[016](specs/016-gpu-instancing.md) GPU instancing, and
+Remaining drafts: [014](specs/014-texture-mipmaps.md) texture mipmaps and
 [017](specs/017-directional-shadow-mapping.md) directional shadows. Numbering identifies documents,
-not a mandatory execution sequence; mipmaps can proceed independently of instancing/shadows.
+not a mandatory execution sequence; mipmaps can proceed independently of shadows.
 
 ## Phase 3: Scene & asset infrastructure
 

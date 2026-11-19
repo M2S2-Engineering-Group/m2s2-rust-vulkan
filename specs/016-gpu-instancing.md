@@ -1,6 +1,6 @@
 # 016: GPU instancing
 
-**Status**: Draft for review; not implemented.
+**Status**: Implemented and verified (CPU gates pass; GPU acceptance confirmed by user).
 **Roadmap item**: Phase 2 basic instancing.
 **Dependencies**: 012's exclusive per-frame writes, 013's Camera/SpecularMaterial, and 015's MeshId,
 Object and validated resource store. Depends on those design contracts; no implementation prerequisite
@@ -139,7 +139,59 @@ None blocking. Everything above was a design-blocking decision; all are resolved
 
 ## Outcome
 
-Pending implementation.
+Implemented across five tasks. Task 1 (`e895322`) added `InstanceData` (80-byte, four `Mat4` rows plus
+packed specular color/shininess) and `InstanceBuffer` (one host-visible mapped vertex buffer per
+frame-in-flight slot, mirroring the existing `Camera`/`Light` per-frame pattern) — pure addition, not
+yet wired in. Task 2 (`c4eed9c`) widened `pipeline.rs`'s `PipelineDescription` from a single vertex
+binding to a slice, a zero-behavior-change refactor updating both the scene and text pipelines that
+share it. Task 3 (`2c2567c`) wired the real instance binding into both shaders and the pipeline,
+removing `ModelPushConstants`/`MaterialPushConstants` entirely — every object still drew via its own
+single-instance call at this point, proving the new mechanism pixel-identical to the old one before
+batching complexity landed on top. Task 4 (`42bb6b4`) added the real contiguous-batching walk:
+consecutive objects sharing a resolved `(MeshId, resolved vk::DescriptorSet)` key merge into one
+instanced draw; `MAX_INSTANCES_PER_FRAME = 4096` is validated before any GPU work; `scene_draw_calls`
+now counts batches, `scene_instances` counts total objects, `submitted_indices` sums
+`indexCount * instanceCount` per batch — all re-derived from the real production batching function,
+never a parallel counting model. Task 5 (`00dee6e`) added three golden-image GPU acceptance tests
+to `HeadlessRenderer` (which also gained `scene_draw_calls`/`scene_instances` accessors it didn't
+have before, mirroring `VulkanRenderer`'s own pattern): 25 instances of one mesh including a
+genuinely non-uniformly-scaled instance, asserting `scene_draw_calls == 1`; six objects across three
+mesh/texture runs (A×3, B×2, A×1), asserting `scene_draw_calls == 3`; and text drawn alongside an
+instanced scene via `render_frame_with_text`.
+
+Three real planning/implementation incidents occurred and were each caught and fixed properly, not
+worked around: Task 3's first implementer attempt correctly identified a GLSL matrix-constructor
+pitfall (columns, not rows) flagged forward by Task 1's own reviewer, and the final whole-branch
+review independently re-derived the transpose math from scratch to confirm it; two implementer
+sessions (Tasks 3 and 4) hit session usage limits immediately after finishing their real work but
+before committing, and in both cases the controller independently re-verified the uncommitted work
+(clean build, clean full gate suite) before committing exactly as left.
+
+Verified (CPU): 105 unit tests pass (up from 94 pre-spec), 18 `#[ignore]`d (GPU-dependent, up from
+15), plus 2 example-crate tests and 4 doctests; all four quality gates clean. `glslc`/`spirv-val`
+clean on both recompiled shaders. An independent whole-branch review (model: Opus) found 0 Critical,
+0 Important issues — independently re-verified the `InstanceData` offset chain across all four
+layers (struct, pipeline attribute descriptions, binding description, shader), the transpose
+necessity, and that the per-instance inverse-transpose normal matrix is computed from each
+instance's own reconstructed model (not a batch-shared value). It also investigated a flagged
+possible coverage gap (whether "same mesh, different texture" was tested as distinct from "different
+mesh") and found it already covered by Task 4's own test, correct by construction regardless since
+the batch key already includes resolved texture identity. Three Minor findings (a stale module header
+comment and vestigial `#[allow(dead_code)]` attributes in `instance_buffer.rs`, orphaned once Tasks
+3/4 gave it real callers; one dangling doc reference to a deleted function) were fixed directly in a
+follow-up commit (`16d5c04`) rather than deferred, since the reviewer explicitly judged them a single
+trivial cleanup.
+
+**GPU acceptance: confirmed by the user.** All 18 previously-`#[ignore]`d tests pass on real Vulkan
+hardware with zero validation errors, including the 3 new instanced-batching golden images generated
+via `M2S2_UPDATE_GOLDEN=1` and committed to `testdata/golden/`. Because this spec changed the shared
+scene pipeline and shaders, every pre-existing golden image from specs 015/018/019 was also
+re-compared against its committed baseline during the same run — all are byte-identical to what was
+already committed, confirming zero visual regression anywhere in the prior GPU-tested surface.
+
+Deferred per Non-goals: global sorting, indirect draws, bindless textures, compute culling, a scene
+graph, transparency sorting, per-instance descriptor indexing, animation/skinning. The roadmap's
+"Basic instancing" box is now checked.
 
 ## References
 
