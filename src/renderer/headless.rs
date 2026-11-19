@@ -1669,6 +1669,80 @@ mod tests {
         assert_eq!(renderer.validation_error_count(), 0);
     }
 
+    // --- Spec 014 (texture mipmaps): create_texture_with_options ownership/failure-path tests ---
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver"]
+    fn create_texture_with_options_rejects_mismatched_pixels_without_publishing_a_texture_id() {
+        let mut renderer = HeadlessRenderer::new_empty(MULTI_MESH_EXTENT).unwrap();
+        let textures_before = renderer.textures.len();
+        let sets_before = renderer.texture_sets.len();
+
+        // One byte short of 4x4 RGBA8 (64 bytes): SampledImage's existing validate_pixels check
+        // rejects this before any mip-specific GPU work runs, exercising the Generate path's error
+        // handling end-to-end without needing a device whose mip capabilities are actually
+        // insufficient (impractical to synthesize without real hardware -- see spec 014's
+        // "Capability checks and explicit failure policy").
+        let result = renderer.create_texture_with_options(
+            &[0u8; 63],
+            4,
+            4,
+            TextureOptions {
+                mipmaps: texture::Mipmaps::Generate,
+            },
+        );
+        assert!(matches!(result, Err(VulkanError::ValidationError(_))));
+        assert_eq!(renderer.textures.len(), textures_before);
+        assert_eq!(renderer.texture_sets.len(), sets_before);
+        assert!(
+            !renderer.terminal,
+            "a non-terminal validation error must not leave the renderer terminal"
+        );
+
+        // The renderer must still be usable afterward: a correctly-sized request on the same
+        // renderer succeeds, proving the failed call above left no half-built state behind.
+        assert!(renderer
+            .create_texture_with_options(
+                &[255u8; 64],
+                4,
+                4,
+                TextureOptions {
+                    mipmaps: texture::Mipmaps::Generate,
+                },
+            )
+            .is_ok());
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver"]
+    fn successful_generate_call_publishes_exactly_one_texture_id_and_one_descriptor_set() {
+        let mut renderer = HeadlessRenderer::new_empty(MULTI_MESH_EXTENT).unwrap();
+        let textures_before = renderer.textures.len();
+        let sets_before = renderer.texture_sets.len();
+
+        let id = renderer
+            .create_texture_with_options(
+                &[200u8; 64],
+                4,
+                4,
+                TextureOptions {
+                    mipmaps: texture::Mipmaps::Generate,
+                },
+            )
+            .expect("a small Generate request must succeed on a real device");
+
+        assert_eq!(renderer.textures.len(), textures_before + 1);
+        assert_eq!(renderer.texture_sets.len(), sets_before + 1);
+
+        let white = renderer.white_texture.as_ref().unwrap().set;
+        let resolved =
+            texture::resolve_texture_set(Some(id), renderer.owner, &renderer.texture_sets, white)
+                .expect("the returned TextureId must resolve against this renderer");
+        assert_eq!(resolved, *renderer.texture_sets.last().unwrap());
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
+
     // --- Spec 016 (GPU instancing): golden-image acceptance tests for the batched instance path ---
 
     const MANY_INSTANCES_GRID: usize = 5;

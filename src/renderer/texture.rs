@@ -358,4 +358,46 @@ mod tests {
         let other = handle::next_owner_id();
         assert!(resolve_texture_set(Some(TextureId::new(owner, 0)), other, &sets, white).is_err());
     }
+
+    // Spec 014 (texture mipmaps): `StoredTexture::new` must roll back cleanly on a non-terminal
+    // validation error, not leak the descriptor pool/image it had started building. Mirrors
+    // `mesh.rs`'s `upload_and_resolve_round_trip_on_a_real_device` in constructing a real
+    // instance/device/allocator directly (no `HeadlessRenderer` needed at this level) -- see
+    // `headless.rs`'s own `create_texture_with_options_*` tests for the ownership-store-level
+    // version of this same contract (no `TextureId`/descriptor entry published, renderer not left
+    // terminal).
+    #[test]
+    #[ignore = "needs a real Vulkan driver"]
+    fn stored_texture_new_rolls_back_cleanly_on_a_validation_error() {
+        let instance = super::super::instance::VulkanInstance::new_headless().expect("instance");
+        let device = super::super::device::VulkanDevice::new_headless(&instance).expect("device");
+        let mut allocator =
+            super::super::allocator::Allocator::new(&instance, &device).expect("allocator");
+        let layout = create_set_layout(&device).expect("set layout");
+
+        // One byte short of 4x4 RGBA8 (64 bytes): `SampledImage::new`'s existing `validate_pixels`
+        // check rejects this before any image, descriptor pool, or descriptor set is created -- a
+        // non-terminal validation error `StoredTexture::new` must roll back, not leak.
+        let result = StoredTexture::new(
+            &device,
+            &mut allocator,
+            &instance,
+            layout,
+            &[0u8; 63],
+            4,
+            4,
+            TextureOptions {
+                mipmaps: Mipmaps::Generate,
+            },
+        );
+        assert!(matches!(result, Err(VulkanError::ValidationError(_))));
+
+        drop(allocator);
+        unsafe { device.device.destroy_descriptor_set_layout(layout, None) };
+        drop(device);
+        // If the failed call above had leaked its descriptor pool, image, or allocation, the
+        // validation layer would flag it right here as the device is torn down -- confirming the
+        // rollback actually freed everything, not just that the call returned `Err`.
+        assert_eq!(instance.validation_error_count(), 0);
+    }
 }
