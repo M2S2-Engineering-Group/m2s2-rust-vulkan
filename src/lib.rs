@@ -9,7 +9,7 @@ pub use renderer::light::{DirectionalLight, PointLight, MAX_POINT_LIGHTS};
 pub use renderer::mesh::MeshId;
 pub use renderer::scene::Object;
 pub use renderer::text::TextDraw;
-pub use renderer::texture::{SpecularMaterial, TextureId};
+pub use renderer::texture::{Mipmaps, SpecularMaterial, TextureId, TextureOptions};
 pub use renderer::uniform::Camera;
 pub use renderer::VulkanRenderer;
 // Re-exported so consumers can name the handle types `VulkanRenderer::new` takes without

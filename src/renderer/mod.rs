@@ -214,10 +214,12 @@ impl VulkanRenderer {
             white_texture = Some(StoredTexture::new(
                 &device,
                 &mut allocator,
+                &instance,
                 layout,
                 &[255, 255, 255, 255],
                 1,
                 1,
+                texture::TextureOptions::default(),
             )?);
 
             light = Some(Light::new(&device, &mut allocator)?);
@@ -572,20 +574,37 @@ impl VulkanRenderer {
 
     /// Upload an RGBA8 image (`rgba8.len() == width * height * 4`, both non-zero) into a new
     /// renderer-owned texture, returning its handle. The texture is freed when the renderer drops.
+    /// Single-level (`Mipmaps::Disabled`) — equivalent to
+    /// `create_texture_with_options(rgba8, width, height, TextureOptions::default())`.
     pub fn create_texture(
         &mut self,
         rgba8: &[u8],
         width: u32,
         height: u32,
     ) -> Result<texture::TextureId> {
+        self.create_texture_with_options(rgba8, width, height, texture::TextureOptions::default())
+    }
+
+    /// Upload an RGBA8 image into a new renderer-owned texture with explicit `options` (e.g.
+    /// `Mipmaps::Generate` to generate a full mip chain). The texture is freed when the renderer
+    /// drops. See spec 014.
+    pub fn create_texture_with_options(
+        &mut self,
+        rgba8: &[u8],
+        width: u32,
+        height: u32,
+        options: texture::TextureOptions,
+    ) -> Result<texture::TextureId> {
         self.ensure_not_terminal()?;
         let stored = StoredTexture::new(
             &self.device,
             &mut self.allocator,
+            &self.instance,
             self.texture_set_layout,
             rgba8,
             width,
             height,
+            options,
         );
         let stored = self.guard(stored)?;
         let id = texture::TextureId::new(self.owner_id, self.textures.len());

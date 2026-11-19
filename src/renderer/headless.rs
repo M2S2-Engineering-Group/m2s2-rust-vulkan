@@ -17,7 +17,7 @@ use crate::renderer::pipeline::{GraphicsPipeline, InstanceData};
 use crate::renderer::scene::Object;
 use crate::renderer::submission::{SubmitState, SubmitStep};
 use crate::renderer::text::{self, TextDraw, TextRenderer, TextVertex};
-use crate::renderer::texture::{self, StoredTexture};
+use crate::renderer::texture::{self, StoredTexture, TextureId, TextureOptions};
 use crate::renderer::uniform::{self, Uniforms};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
@@ -234,6 +234,8 @@ pub(crate) struct HeadlessRenderer {
     uniforms: Option<Uniforms>,
     texture_set_layout: vk::DescriptorSetLayout,
     white_texture: Option<StoredTexture>,
+    textures: Vec<StoredTexture>,
+    texture_sets: Vec<vk::DescriptorSet>,
     light: Option<Light>,
     instance_buffer: Option<InstanceBuffer>,
     pipeline: ManuallyDrop<GraphicsPipeline>,
@@ -291,10 +293,12 @@ impl HeadlessRenderer {
             white_texture = Some(StoredTexture::new(
                 &device,
                 &mut allocator,
+                &instance,
                 layout,
                 &[255, 255, 255, 255],
                 1,
                 1,
+                TextureOptions::default(),
             )?);
 
             light = Some(Light::new(&device, &mut allocator)?);
@@ -363,6 +367,8 @@ impl HeadlessRenderer {
             uniforms,
             texture_set_layout: texture_set_layout.unwrap(),
             white_texture,
+            textures: Vec::new(),
+            texture_sets: Vec::new(),
             light,
             instance_buffer,
             pipeline: ManuallyDrop::new(pipeline),
@@ -412,7 +418,7 @@ impl HeadlessRenderer {
             texture::resolve_texture_set(
                 object.texture,
                 self.owner,
-                &[],
+                &self.texture_sets,
                 self.white_texture.as_ref().unwrap().set,
             )?;
         }
@@ -646,13 +652,11 @@ impl HeadlessRenderer {
                 .as_ref()
                 .expect("instance buffer present outside teardown")
                 .buffer(0);
-            // Every object below uses `texture: None`, which resolves to `white_set` regardless of
-            // `owner` — but `owner`/`self.meshes` ARE consulted to resolve each object's own mesh.
             command::emit_object_draws(
                 objects,
                 self.owner,
                 &self.meshes,
-                &[],
+                &self.texture_sets,
                 white_set,
                 instance_buffer_handle,
                 |command| match command {
@@ -806,7 +810,7 @@ impl HeadlessRenderer {
             objects,
             self.owner,
             &self.meshes,
-            &[],
+            &self.texture_sets,
             white_set,
             vk::Buffer::null(),
             |command| {
@@ -862,6 +866,62 @@ impl HeadlessRenderer {
         Ok(id)
     }
 
+    /// Upload an RGBA8 image into a new renderer-owned texture using the production uploader.
+    /// Single-level (`Mipmaps::Disabled`) — equivalent to
+    /// `create_texture_with_options(rgba8, width, height, TextureOptions::default())`.
+    /// `#[allow(dead_code)]`: consumed by Task 5's GPU tests (spec 014), which render against a
+    /// real, non-white texture. Exercised today only indirectly, via `create_texture_with_options`.
+    #[allow(dead_code)]
+    pub(crate) fn create_texture(
+        &mut self,
+        rgba8: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<TextureId> {
+        self.create_texture_with_options(rgba8, width, height, TextureOptions::default())
+    }
+
+    /// Upload an RGBA8 image into a new renderer-owned texture with explicit `options` (e.g.
+    /// `Mipmaps::Generate` to generate a full mip chain). Mirrors
+    /// `VulkanRenderer::create_texture_with_options`.
+    /// `#[allow(dead_code)]`: consumed by Task 5's GPU tests (spec 014).
+    #[allow(dead_code)]
+    pub(crate) fn create_texture_with_options(
+        &mut self,
+        rgba8: &[u8],
+        width: u32,
+        height: u32,
+        options: TextureOptions,
+    ) -> Result<TextureId> {
+        if self.terminal {
+            return Err(VulkanError::Terminal(
+                "headless renderer is terminal".into(),
+            ));
+        }
+        let stored = match StoredTexture::new(
+            &self.device,
+            &mut self.allocator,
+            &self.instance,
+            self.texture_set_layout,
+            rgba8,
+            width,
+            height,
+            options,
+        ) {
+            Ok(stored) => stored,
+            Err(error) => {
+                if matches!(error, VulkanError::Terminal(_)) {
+                    self.terminal = true;
+                }
+                return Err(error);
+            }
+        };
+        let id = TextureId::new(self.owner, self.textures.len());
+        self.texture_sets.push(stored.set);
+        self.textures.push(stored);
+        Ok(id)
+    }
+
     /// Existing single-mesh fixtures keep their original handle and pixels.
     pub(crate) fn mesh(&self) -> MeshId {
         assert!(!self.meshes.is_empty(), "no mesh was uploaded");
@@ -900,6 +960,7 @@ impl Drop for HeadlessRenderer {
             std::mem::forget(self.instance_buffer.take());
             std::mem::forget(self.depth.take());
             std::mem::forget(self.white_texture.take());
+            std::mem::forget(std::mem::take(&mut self.textures));
             std::mem::forget(self.target.take());
             std::mem::forget(self.text.take());
             std::mem::forget(std::mem::take(&mut self.meshes));
@@ -917,6 +978,9 @@ impl Drop for HeadlessRenderer {
             }
             if let Some(instance_buffer) = self.instance_buffer.take() {
                 instance_buffer.destroy(&self.device, &mut self.allocator);
+            }
+            for texture in std::mem::take(&mut self.textures) {
+                texture.destroy(&self.device, &mut self.allocator);
             }
             if let Some(white_texture) = self.white_texture.take() {
                 white_texture.destroy(&self.device, &mut self.allocator);

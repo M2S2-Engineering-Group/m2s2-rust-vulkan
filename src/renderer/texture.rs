@@ -1,10 +1,40 @@
 //! Caller-facing texture handles and the renderer-owned texture resource.
-use super::{allocator::Allocator, device::VulkanDevice, handle, image::SampledImage};
+use super::{
+    allocator::Allocator, device::VulkanDevice, handle, image::SampledImage,
+    instance::VulkanInstance, mip,
+};
 use crate::{
     error::{Result, VulkanError},
     math::Vec3,
 };
 use ash::vk;
+
+/// Mipmap generation policy for a texture created via `create_texture_with_options`. `Disabled`
+/// preserves the existing single-level behavior; `Generate` requests a full mip chain, failing
+/// `create_texture_with_options` (before any GPU submission) if the selected device can't support
+/// the multi-level blit path for the requested extent — see spec 014's "Capability checks and
+/// explicit failure policy".
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Mipmaps {
+    Disabled,
+    Generate,
+}
+
+/// Options for `VulkanRenderer::create_texture_with_options`/
+/// `HeadlessRenderer::create_texture_with_options`.
+#[derive(Copy, Clone, Debug)]
+pub struct TextureOptions {
+    pub mipmaps: Mipmaps,
+}
+
+impl Default for TextureOptions {
+    /// `Mipmaps::Disabled` — preserves `create_texture`'s existing single-level behavior.
+    fn default() -> Self {
+        Self {
+            mipmaps: Mipmaps::Disabled,
+        }
+    }
+}
 
 /// Opaque handle to a renderer-owned texture: an `(owner, slot)` pair identifying one entry in the
 /// renderer's texture store. `Copy`; valid for the lifetime of the renderer that produced it. Fields
@@ -78,6 +108,68 @@ pub(super) fn create_set_layout(device: &VulkanDevice) -> Result<vk::DescriptorS
     .map_err(VulkanError::from)
 }
 
+/// Resolve `options.mipmaps` into a concrete `MipPolicy` for an R8G8B8A8_SRGB texture of
+/// `width`x`height`, querying the selected device's format/image-format support as needed and
+/// feeding the results to the pure `mip::select_mip_policy` decision helper (spec 014's
+/// "Capability checks and explicit failure policy"). The image-format-properties query — the only
+/// one that needs the real usage/extent/mip-count, and the only one that can return
+/// `ERROR_FORMAT_NOT_SUPPORTED` — is skipped unless mips are actually requested for a texture
+/// whose computed level count exceeds one; a 1x1 (or otherwise single-level) `Generate` request
+/// needs no blit and so needs no capability check, matching `select_mip_policy`'s own bypass.
+fn select_mip_policy_for(
+    instance: &VulkanInstance,
+    device: &VulkanDevice,
+    width: u32,
+    height: u32,
+    options: TextureOptions,
+) -> Result<mip::MipPolicy> {
+    let requested = options.mipmaps;
+    let format_features = unsafe {
+        instance.instance.get_physical_device_format_properties(
+            device.physical_device,
+            vk::Format::R8G8B8A8_SRGB,
+        )
+    }
+    .optimal_tiling_features;
+
+    let image_format_properties = if requested == Mipmaps::Generate {
+        let level_count = mip::mip_level_count(width, height)?;
+        if level_count > 1 {
+            let usage = vk::ImageUsageFlags::TRANSFER_DST
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC;
+            match unsafe {
+                instance
+                    .instance
+                    .get_physical_device_image_format_properties(
+                        device.physical_device,
+                        vk::Format::R8G8B8A8_SRGB,
+                        vk::ImageType::TYPE_2D,
+                        vk::ImageTiling::OPTIMAL,
+                        usage,
+                        vk::ImageCreateFlags::empty(),
+                    )
+            } {
+                Ok(props) => Some(props),
+                Err(vk::Result::ERROR_FORMAT_NOT_SUPPORTED) => None,
+                Err(error) => return Err(VulkanError::from(error)),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    mip::select_mip_policy(
+        requested,
+        width,
+        height,
+        format_features,
+        image_format_properties,
+    )
+}
+
 pub(crate) struct StoredTexture {
     image: SampledImage,
     pool: vk::DescriptorPool,
@@ -85,17 +177,26 @@ pub(crate) struct StoredTexture {
 }
 
 impl StoredTexture {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         device: &VulkanDevice,
         allocator: &mut Allocator,
+        instance: &VulkanInstance,
         layout: vk::DescriptorSetLayout,
         rgba8: &[u8],
         width: u32,
         height: u32,
+        options: TextureOptions,
     ) -> Result<Self> {
+        let policy = select_mip_policy_for(instance, device, width, height, options)?;
         // SampledImage::new_rgba8_srgb validates and rolls back its own partial resources on error.
-        let image =
-            SampledImage::new_rgba8_srgb(device, allocator, vk::Extent2D { width, height }, rgba8)?;
+        let image = SampledImage::new_rgba8_srgb(
+            device,
+            allocator,
+            vk::Extent2D { width, height },
+            rgba8,
+            policy,
+        )?;
         let dev = &device.device;
         // Pool is created outside the allocate/write closure below so its handle is available to
         // the error arm: if allocation or the descriptor write fails, the pool must still be
@@ -192,6 +293,11 @@ mod tests {
     fn specular_material_default_matches_pre_013_look() {
         let m = SpecularMaterial::default();
         assert_eq!((m.color, m.shininess), (Vec3::new(0.0, 0.0, 0.0), 32.0));
+    }
+
+    #[test]
+    fn texture_options_default_is_disabled() {
+        assert_eq!(TextureOptions::default().mipmaps, Mipmaps::Disabled);
     }
 
     #[test]

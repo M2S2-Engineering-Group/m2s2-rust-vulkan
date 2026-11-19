@@ -1,24 +1,12 @@
 /// Pure helper functions for mipmap-level planning: computing mip-level counts,
 /// mip extents, and the sequence of blits needed to generate all levels from a base image.
 /// No GPU types — just integer math and planning data structures.
+use super::texture::Mipmaps;
 use crate::error::{Result, VulkanError};
 use ash::vk;
 
-/// Mipmap generation policy: disabled (single-level image) or enabled (multi-level generation).
-/// Task 3 will move the *public* version of this enum to `texture.rs` and re-export from `lib.rs`;
-/// this is a temporary placeholder for decision logic.
-/// `#[allow(dead_code)]`: consumed by Task 3. Exercised today only by this module's tests.
-#[allow(dead_code)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Mipmaps {
-    Disabled,
-    Generate,
-}
-
 /// The result of a capability check and mipmap policy decision: either single-level, or
 /// multi-level generation with the computed level count.
-/// `#[allow(dead_code)]`: consumed by Task 3. Exercised today only by this module's tests.
-#[allow(dead_code)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MipPolicy {
     OneLevel,
@@ -30,9 +18,6 @@ pub(crate) enum MipPolicy {
 /// using bit operations to avoid floating-point.
 ///
 /// Returns `Err(ValidationError)` if either dimension is 0.
-///
-/// `#[allow(dead_code)]`: consumed by Tasks 2 and 3. Exercised today only by this module's tests.
-#[allow(dead_code)]
 pub(crate) fn mip_level_count(width: u32, height: u32) -> Result<u32> {
     if width == 0 || height == 0 {
         return Err(VulkanError::ValidationError(
@@ -49,9 +34,6 @@ pub(crate) fn mip_level_count(width: u32, height: u32) -> Result<u32> {
 /// Computes the extent (width, height) of mip level `level` given a base image of
 /// `base_width × base_height`. Each level is halved in both dimensions (rounded down),
 /// but never reaches 0 in either dimension — the smallest is always 1×1.
-///
-/// `#[allow(dead_code)]`: consumed by Tasks 2 and 3. Exercised today only by this module's tests.
-#[allow(dead_code)]
 pub(crate) fn mip_extent(base_width: u32, base_height: u32, level: u32) -> (u32, u32) {
     let w = (base_width >> level).max(1);
     let h = (base_height >> level).max(1);
@@ -61,9 +43,6 @@ pub(crate) fn mip_extent(base_width: u32, base_height: u32, level: u32) -> (u32,
 /// One blit operation from one mip level to the next. Encodes the source and destination
 /// level numbers and their respective extents, so the caller can record the actual
 /// `vkCmdBlitImage` command.
-///
-/// `#[allow(dead_code)]`: consumed by Tasks 2 and 3. Exercised today only by this module's tests.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BlitStep {
     pub src_level: u32,
@@ -75,9 +54,6 @@ pub(crate) struct BlitStep {
 /// Plans the sequence of blit steps needed to generate all mip levels from a base image.
 /// Returns one `BlitStep` per level from level 1 to `level_count - 1`, with each step
 /// blitting from the previous level to the next. Returns an empty `Vec` when `level_count <= 1`.
-///
-/// `#[allow(dead_code)]`: consumed by Tasks 2 and 3. Exercised today only by this module's tests.
-#[allow(dead_code)]
 pub(crate) fn plan_blits(base_width: u32, base_height: u32, level_count: u32) -> Vec<BlitStep> {
     if level_count <= 1 {
         return Vec::new();
@@ -113,9 +89,6 @@ pub(crate) fn plan_blits(base_width: u32, base_height: u32, level_count: u32) ->
 ///     `max_extent` covering `(width, height)`
 ///   - If all present: `Ok(MipPolicy::Generate { level_count })`
 ///   - If any missing: `Err(ValidationError("..."))` naming which capability is missing
-///
-/// `#[allow(dead_code)]`: consumed by Task 3. Exercised today only by this module's tests.
-#[allow(dead_code)]
 pub(crate) fn select_mip_policy(
     requested: Mipmaps,
     width: u32,
