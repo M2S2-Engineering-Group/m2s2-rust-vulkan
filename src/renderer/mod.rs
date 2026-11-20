@@ -390,6 +390,23 @@ impl VulkanRenderer {
             None => None,
             Some(config) => {
                 shadow::validate_directional_shadow(config)?;
+                // The shadow depth image is config.resolution x config.resolution; reject before
+                // storing a pending reallocation that `vkCreateImage` would reject anyway (and
+                // would otherwise retry forever every frame, since a device-limit violation never
+                // becomes valid on retry, unlike a transient allocation failure).
+                let max_dimension = unsafe {
+                    self.instance
+                        .instance
+                        .get_physical_device_properties(self.device.physical_device)
+                }
+                .limits
+                .max_image_dimension2_d;
+                if config.resolution > max_dimension {
+                    return Err(VulkanError::ValidationError(format!(
+                        "directional shadow resolution {} exceeds device max_image_dimension2D {}",
+                        config.resolution, max_dimension
+                    )));
+                }
                 Some(config.resolution)
             }
         };
@@ -556,6 +573,11 @@ impl VulkanRenderer {
         // has succeeded, so a failure here leaves the renderer's prior shadow state untouched and
         // `pending_shadow_config` set for a retry on the next frame).
         if let Some(requested_resolution) = self.pending_shadow_config {
+            // The old pipeline/shadow resources below may still be referenced by a command buffer
+            // the GPU has not finished executing (only the NEXT `draw_frame` call waits on that
+            // frame slot's fence) -- wait for the device to go idle before destroying anything, the
+            // same rule `pending_resize` above already follows for `depth`/`pipeline`.
+            self.wait_idle()?;
             let color_format = self.swapchain.format;
             let depth_format = self.depth.as_ref().unwrap().format();
             match requested_resolution {
