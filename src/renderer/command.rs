@@ -220,8 +220,9 @@ impl FrameContext {
                 .map(|object| {
                     InstanceData::from((
                         object.model,
-                        object.specular.color,
-                        object.specular.shininess,
+                        object.material.base_color,
+                        object.material.specular.color,
+                        object.material.specular.shininess,
                     ))
                 })
                 .collect();
@@ -789,7 +790,7 @@ pub(super) fn emit_object_draws(
     let resolve = |object: &Object| -> (mesh::MeshId, &StoredMesh, vk::DescriptorSet) {
         let resolved = mesh::resolve_mesh(object.mesh, owner, meshes)
             .expect("object handles were validated above, before this point was reached");
-        let set = resolve_texture_set(object.texture, owner, texture_sets, white_set)
+        let set = resolve_texture_set(object.material.texture, owner, texture_sets, white_set)
             .expect("object handles were validated above, before this point was reached");
         (object.mesh, resolved, set)
     };
@@ -950,6 +951,7 @@ mod tests {
     }
 
     use super::super::buffer::Buffer;
+    use super::super::material::Material;
     use super::super::texture::SpecularMaterial;
     use super::*;
     use ash::vk::Handle;
@@ -1062,20 +1064,29 @@ mod tests {
             Object {
                 mesh: mesh_a,
                 model: m0,
-                texture: None,
-                specular: specular0,
+                material: Material {
+                    texture: None,
+                    specular: specular0,
+                    ..Default::default()
+                },
             },
             Object {
                 mesh: mesh_b,
                 model: m1,
-                texture: Some(crate::renderer::texture::TextureId::new(owner, 1)),
-                specular: specular1,
+                material: Material {
+                    texture: Some(crate::renderer::texture::TextureId::new(owner, 1)),
+                    specular: specular1,
+                    ..Default::default()
+                },
             },
             Object {
                 mesh: mesh_a,
                 model: m2,
-                texture: None,
-                specular: specular2,
+                material: Material {
+                    texture: None,
+                    specular: specular2,
+                    ..Default::default()
+                },
             },
         ];
         let instance_buffer = instances(0xD0);
@@ -1128,8 +1139,10 @@ mod tests {
             .map(|i| Object {
                 mesh,
                 model: crate::math::translate(&crate::math::Vec3::new(i as f32, 0.0, 0.0)),
-                texture,
-                specular: SpecularMaterial::default(),
+                material: Material {
+                    texture,
+                    ..Default::default()
+                },
             })
             .collect()
     }
@@ -1189,6 +1202,66 @@ mod tests {
     }
 
     #[test]
+    fn batched_objects_keep_their_own_distinct_base_color() {
+        // Two objects share mesh and texture, so they still batch into one instanced run (as
+        // above), but their Material.base_color differs. Build InstanceData the same way the
+        // real render path does (see mod.rs's frame-update closure) and confirm each instance
+        // keeps its own tint rather than collapsing to one shared value.
+        let white = set(0x10);
+        let owner = crate::renderer::handle::next_owner_id();
+        let meshes = [stored_mesh(0x1000, 0x1001, 3)];
+        let mesh_a = mesh::MeshId::new(owner, 0);
+        let objects = [
+            Object {
+                mesh: mesh_a,
+                model: crate::math::Mat4::identity(),
+                material: Material {
+                    base_color: crate::math::Vec3::new(1.0, 0.0, 0.0),
+                    ..Default::default()
+                },
+            },
+            Object {
+                mesh: mesh_a,
+                model: crate::math::Mat4::identity(),
+                material: Material {
+                    base_color: crate::math::Vec3::new(0.0, 0.0, 1.0),
+                    ..Default::default()
+                },
+            },
+        ];
+        let instance_buffer = instances(0xD0);
+        assert_eq!(
+            record_objects(&objects, owner, &meshes, &[], white, instance_buffer),
+            vec![
+                RecordedCommand::InstanceBuffer(instance_buffer),
+                RecordedCommand::Mesh(
+                    meshes[0].vertex_buffer.buffer,
+                    meshes[0].index_buffer.buffer
+                ),
+                RecordedCommand::Bind(white),
+                RecordedCommand::Draw {
+                    index_count: 3,
+                    instance_count: 2,
+                    first_instance: 0,
+                },
+            ]
+        );
+
+        let instances: Vec<InstanceData> = objects
+            .iter()
+            .map(|object| {
+                InstanceData::from((
+                    object.model,
+                    object.material.base_color,
+                    object.material.specular.color,
+                    object.material.specular.shininess,
+                ))
+            })
+            .collect();
+        assert_ne!(instances[0].base_color, instances[1].base_color);
+    }
+
+    #[test]
     fn strictly_alternating_mesh_produces_one_run_per_object() {
         let white = set(0x10);
         let owner = crate::renderer::handle::next_owner_id();
@@ -1204,8 +1277,7 @@ mod tests {
             .map(|(i, mesh)| Object {
                 mesh,
                 model: crate::math::translate(&crate::math::Vec3::new(i as f32, 0.0, 0.0)),
-                texture: None,
-                specular: SpecularMaterial::default(),
+                material: Material::default(),
             })
             .collect();
         let instance_buffer = instances(0xD0);
@@ -1273,8 +1345,7 @@ mod tests {
             .map(|(i, mesh)| Object {
                 mesh,
                 model: crate::math::translate(&crate::math::Vec3::new(i as f32, 0.0, 0.0)),
-                texture: None,
-                specular: SpecularMaterial::default(),
+                material: Material::default(),
             })
             .collect();
         let instance_buffer = instances(0xD0);
@@ -1338,14 +1409,15 @@ mod tests {
             Object {
                 mesh: mesh_a,
                 model: crate::math::translate(&crate::math::Vec3::new(0.0, 0.0, 0.0)),
-                texture: None,
-                specular: SpecularMaterial::default(),
+                material: Material::default(),
             },
             Object {
                 mesh: mesh_a,
                 model: crate::math::translate(&crate::math::Vec3::new(1.0, 0.0, 0.0)),
-                texture: tex_same_as_white,
-                specular: SpecularMaterial::default(),
+                material: Material {
+                    texture: tex_same_as_white,
+                    ..Default::default()
+                },
             },
         ];
         let instance_buffer = instances(0xD0);
@@ -1373,14 +1445,15 @@ mod tests {
             Object {
                 mesh: mesh_a,
                 model: crate::math::translate(&crate::math::Vec3::new(0.0, 0.0, 0.0)),
-                texture: None,
-                specular: SpecularMaterial::default(),
+                material: Material::default(),
             },
             Object {
                 mesh: mesh_a,
                 model: crate::math::translate(&crate::math::Vec3::new(1.0, 0.0, 0.0)),
-                texture: tex_distinct,
-                specular: SpecularMaterial::default(),
+                material: Material {
+                    texture: tex_distinct,
+                    ..Default::default()
+                },
             },
         ];
         assert_eq!(

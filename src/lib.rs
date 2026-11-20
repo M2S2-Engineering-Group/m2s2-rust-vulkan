@@ -7,6 +7,7 @@ pub use error::{Result, VulkanError};
 pub use renderer::buffer::{Index, Vertex};
 pub use renderer::diagnostics::{Diagnostics, RenderStatus, RendererStats};
 pub use renderer::light::{DirectionalLight, PointLight, MAX_POINT_LIGHTS};
+pub use renderer::material::Material;
 pub use renderer::mesh::MeshId;
 pub use renderer::scene::Object;
 pub use renderer::shadow::DirectionalShadow;

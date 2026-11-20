@@ -28,8 +28,9 @@ const SHADOW_DEPTH_VERTEX_SHADER: &[u8] = include_bytes!("../../shaders/shadow_d
 /// Per-instance GPU payload for instanced draws (plan 016): one row-major `Mat4` model transform,
 /// unpacked into four separate `vec4`s (`model_row0..3`) because the GLSL side reads four distinct
 /// `vec4` instance-rate attribute locations, not one `mat4` attribute, plus the specular
-/// color/shininess packed into a fifth `vec4` (`xyz` = color, `w` = shininess). 80 bytes, offsets
-/// 0/16/32/48/64.
+/// color/shininess packed into a fifth `vec4` (`xyz` = color, `w` = shininess), plus (spec 021) the
+/// material's base-color tint packed into a sixth `vec4` (`xyz` = tint, `w` unused padding). 96
+/// bytes, offsets 0/16/32/48/64/80.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct InstanceData {
@@ -38,14 +39,16 @@ pub(crate) struct InstanceData {
     pub model_row2: Vec4,
     pub model_row3: Vec4,
     pub specular: Vec4,
+    pub base_color: Vec4,
 }
 
-impl From<(Mat4, Vec3, f32)> for InstanceData {
+impl From<(Mat4, Vec3, Vec3, f32)> for InstanceData {
     /// Extracts each row of a row-major `Mat4` as a `Vec4` via `m2s2-math`'s `Index<usize>` impl on
     /// `Matrix4x4`, which returns row `i`'s four components as `&[f32]` (row-major storage, same
     /// convention as `CameraUniforms`'s `row_major` GLSL qualifier) — `Vec4::from_slice` copies that
-    /// into an owned `Vec4`. `specular_color` and `shininess` pack into one `vec4` (`xyz`/`w`).
-    fn from((model, specular_color, shininess): (Mat4, Vec3, f32)) -> Self {
+    /// into an owned `Vec4`. `specular_color` and `shininess` pack into one `vec4` (`xyz`/`w`);
+    /// `base_color` packs into another (`xyz`/`w`, `w` unused).
+    fn from((model, base_color, specular_color, shininess): (Mat4, Vec3, Vec3, f32)) -> Self {
         Self {
             model_row0: Vec4::from_slice(&model[0]),
             model_row1: Vec4::from_slice(&model[1]),
@@ -57,14 +60,15 @@ impl From<(Mat4, Vec3, f32)> for InstanceData {
                 specular_color[2],
                 shininess,
             ),
+            base_color: Vec4::new(base_color[0], base_color[1], base_color[2], 1.0),
         }
     }
 }
 
-/// Instance binding's five attribute descriptions (locations 4-8), offsets taken from
+/// Instance binding's six attribute descriptions (locations 4-9), offsets taken from
 /// `InstanceData`'s own field offsets via `std::mem::offset_of!` so they can't drift from the
 /// struct's field order.
-fn instance_attribute_descriptions() -> [vk::VertexInputAttributeDescription; 5] {
+fn instance_attribute_descriptions() -> [vk::VertexInputAttributeDescription; 6] {
     let format = vk::Format::R32G32B32A32_SFLOAT;
     [
         vk::VertexInputAttributeDescription::default()
@@ -92,6 +96,11 @@ fn instance_attribute_descriptions() -> [vk::VertexInputAttributeDescription; 5]
             .binding(1)
             .format(format)
             .offset(std::mem::offset_of!(InstanceData, specular) as u32),
+        vk::VertexInputAttributeDescription::default()
+            .location(9)
+            .binding(1)
+            .format(format)
+            .offset(std::mem::offset_of!(InstanceData, base_color) as u32),
     ]
 }
 
@@ -472,20 +481,22 @@ mod tests {
 
     #[test]
     fn instance_data_matches_shader_layout() {
-        assert_eq!(std::mem::size_of::<InstanceData>(), 80);
+        assert_eq!(std::mem::size_of::<InstanceData>(), 96);
         assert_eq!(std::mem::offset_of!(InstanceData, model_row0), 0);
         assert_eq!(std::mem::offset_of!(InstanceData, model_row1), 16);
         assert_eq!(std::mem::offset_of!(InstanceData, model_row2), 32);
         assert_eq!(std::mem::offset_of!(InstanceData, model_row3), 48);
         assert_eq!(std::mem::offset_of!(InstanceData, specular), 64);
+        assert_eq!(std::mem::offset_of!(InstanceData, base_color), 80);
     }
 
     #[test]
-    fn instance_data_converts_rows_and_packs_specular() {
+    fn instance_data_converts_rows_and_packs_base_color_and_specular() {
         let model = crate::math::translate(&Vec3::new(1.0, 2.0, 3.0));
+        let base_color = Vec3::new(0.2, 0.4, 0.6);
         let specular_color = Vec3::new(0.4, 0.5, 0.6);
         let shininess = 32.0;
-        let instance = InstanceData::from((model, specular_color, shininess));
+        let instance = InstanceData::from((model, base_color, specular_color, shininess));
         assert_eq!(instance.model_row0, Vec4::from_slice(&model[0]));
         assert_eq!(instance.model_row1, Vec4::from_slice(&model[1]));
         assert_eq!(instance.model_row2, Vec4::from_slice(&model[2]));
@@ -499,6 +510,10 @@ mod tests {
                 shininess
             )
         );
+        assert_eq!(
+            instance.base_color,
+            Vec4::new(base_color[0], base_color[1], base_color[2], 1.0)
+        );
     }
 
     #[test]
@@ -510,9 +525,9 @@ mod tests {
     }
 
     #[test]
-    fn instance_attributes_occupy_locations_4_through_8_on_binding_1() {
+    fn instance_attributes_occupy_locations_4_through_9_on_binding_1() {
         let attrs = instance_attribute_descriptions();
-        assert_eq!(attrs.len(), 5);
+        assert_eq!(attrs.len(), 6);
         for (i, attr) in attrs.iter().enumerate() {
             assert_eq!(attr.location, 4 + i as u32);
             assert_eq!(attr.binding, 1);
@@ -523,6 +538,7 @@ mod tests {
         assert_eq!(attrs[2].offset, 32);
         assert_eq!(attrs[3].offset, 48);
         assert_eq!(attrs[4].offset, 64);
+        assert_eq!(attrs[5].offset, 80);
     }
 
     // SPIR-V's first word is a fixed magic number; a correctly compiled .spv always starts with it.

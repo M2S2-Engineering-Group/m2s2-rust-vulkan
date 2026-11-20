@@ -57,7 +57,7 @@ impl TextureId {
 
 /// Per-object Blinn-Phong specular parameters (spec 013). `color` tints the highlight; `shininess`
 /// controls its tightness (higher = smaller, sharper highlight).
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct SpecularMaterial {
     pub color: Vec3,
     pub shininess: f32,

@@ -32,14 +32,17 @@ layout(location = 5) in vec4 inModelRow1;
 layout(location = 6) in vec4 inModelRow2;
 layout(location = 7) in vec4 inModelRow3;
 layout(location = 8) in vec4 inSpecular;
+// Material base-color tint (spec 021): `xyz` = tint, `w` unused padding.
+layout(location = 9) in vec4 inBaseColor;
 
 layout(location = 0) out vec3 fragColor;
 layout(location = 1) out vec2 fragUV;
 layout(location = 2) out vec3 fragNormal;
 layout(location = 3) out vec3 fragWorldPos;
 layout(location = 4) flat out vec4 fragSpecular;
+layout(location = 5) flat out vec4 fragBaseColor;
 #ifdef SHADOWS_ENABLED
-layout(location = 5) out vec4 fragLightSpacePos;
+layout(location = 6) out vec4 fragLightSpacePos;
 #endif
 
 void main() {
@@ -62,6 +65,7 @@ void main() {
     // the fragment shader.
     fragNormal = normalMatrix * inNormal;
     fragSpecular = inSpecular;
+    fragBaseColor = inBaseColor;
 #ifdef SHADOWS_ENABLED
     fragLightSpacePos = light.lightViewProj * worldPos;
 #endif

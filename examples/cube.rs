@@ -2,8 +2,9 @@ use m2s2_rust_vulkan::math::{
     look_at, perspective, rotate, to_radians, translate, Mat4, Vec2, Vec3, Vec4,
 };
 use m2s2_rust_vulkan::{
-    init_logging, Camera, Diagnostics, DirectionalLight, DirectionalShadow, Index, Mipmaps, Object,
-    PointLight, SpecularMaterial, TextDraw, TextureOptions, Vertex, VulkanRenderer,
+    init_logging, Camera, Diagnostics, DirectionalLight, DirectionalShadow, Index, Material,
+    Mipmaps, Object, PointLight, SpecularMaterial, TextDraw, TextureOptions, Vertex,
+    VulkanRenderer,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -397,20 +398,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Object {
                         mesh: cube_mesh,
                         model: models[0],
-                        texture: Some(tex_a),
-                        specular: specular[0],
+                        material: Material {
+                            texture: Some(tex_a),
+                            specular: specular[0],
+                            ..Default::default()
+                        },
                     },
                     Object {
                         mesh: cube_mesh,
                         model: models[1],
-                        texture: Some(tex_b),
-                        specular: specular[1],
+                        material: Material {
+                            texture: Some(tex_b),
+                            specular: specular[1],
+                            ..Default::default()
+                        },
                     },
                     Object {
                         mesh: ground_mesh,
                         model: Mat4::IDENTITY,
-                        texture: None,
-                        specular: SpecularMaterial::default(),
+                        material: Material::default(),
                     },
                 ];
                 // Free-fly camera: arrow keys rotate (yaw/pitch), WASD move relative to the facing.

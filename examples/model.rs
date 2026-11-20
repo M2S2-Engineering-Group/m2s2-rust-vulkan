@@ -1,6 +1,6 @@
 use m2s2_rust_vulkan::math::{look_at, perspective, to_radians, Vec2, Vec3, Vec4};
 use m2s2_rust_vulkan::{
-    init_logging, model, Camera, Diagnostics, DirectionalLight, Object, SpecularMaterial, TextDraw,
+    init_logging, model, Camera, Diagnostics, DirectionalLight, Material, Object, TextDraw,
     TextureId, VulkanRenderer,
 };
 use std::collections::HashSet;
@@ -96,8 +96,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         objects.push(Object {
             mesh,
             model: loaded_mesh.world_transform,
-            texture: loaded_mesh.texture.map(|i| texture_ids[i]),
-            specular: SpecularMaterial::default(),
+            material: Material {
+                texture: loaded_mesh.texture.map(|i| texture_ids[i]),
+                ..Default::default()
+            },
         });
     }
     log::info!(

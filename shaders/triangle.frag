@@ -5,8 +5,10 @@ layout(location = 1) in vec2 fragUV;
 layout(location = 2) in vec3 fragNormal;
 layout(location = 3) in vec3 fragWorldPos;
 layout(location = 4) flat in vec4 fragSpecular;
+// Material base-color tint (spec 021): `rgb` = tint, `a` unused padding.
+layout(location = 5) flat in vec4 fragBaseColor;
 #ifdef SHADOWS_ENABLED
-layout(location = 5) in vec4 fragLightSpacePos;
+layout(location = 6) in vec4 fragLightSpacePos;
 #endif
 
 layout(set = 1, binding = 0) uniform sampler2D tex;
@@ -108,7 +110,7 @@ float shadowVisibility(vec4 lightSpacePos) {
 
 void main() {
     vec3 N = normalize(fragNormal);
-    vec4 albedo = texture(tex, fragUV) * vec4(fragColor, 1.0);
+    vec4 albedo = texture(tex, fragUV) * vec4(fragColor, 1.0) * vec4(fragBaseColor.rgb, 1.0);
 
     // Camera-to-surface view vector, normalized once up front; zero when degenerate so every light's
     // specular term naturally contributes nothing without each light re-deriving this guard.

@@ -16,6 +16,7 @@ mod image_readback;
 pub mod instance;
 pub(crate) mod instance_buffer;
 pub mod light;
+pub mod material;
 pub mod mesh;
 pub(crate) mod mip;
 #[cfg(test)]
@@ -46,9 +47,10 @@ use submission::SubmitState;
 /// implemented for anything exposing both handle traits (e.g. a winit `Window`).
 pub(crate) trait WindowOwner: HasWindowHandle + HasDisplayHandle {}
 impl<T: HasWindowHandle + HasDisplayHandle> WindowOwner for T {}
+use material::{validate_material, Material};
 use scene::Object;
 use std::mem::ManuallyDrop;
-use texture::{validate_specular, SpecularMaterial, StoredTexture};
+use texture::StoredTexture;
 
 /// The Vulkan renderer. Owns the whole GPU resource graph; its fields and low-level owners are
 /// private. Construct it with [`VulkanRenderer::with_window`] (safe) or [`VulkanRenderer::new`]
@@ -469,8 +471,7 @@ impl VulkanRenderer {
             &[Object {
                 mesh,
                 model,
-                texture: None,
-                specular: SpecularMaterial::default(),
+                material: Material::default(),
             }],
             camera,
         )
@@ -495,10 +496,10 @@ impl VulkanRenderer {
         uniform::validate_camera(&camera)?;
         validate_object_count(objects.len())?;
         for object in objects {
-            validate_specular(&object.specular)?;
+            validate_material(&object.material)?;
             mesh::resolve_mesh(object.mesh, self.owner_id, &self.meshes)?;
             texture::resolve_texture_set(
-                object.texture,
+                object.material.texture,
                 self.owner_id,
                 &self.texture_sets,
                 self.white_set,
@@ -761,12 +762,11 @@ impl VulkanRenderer {
     /// freed when the renderer drops.
     ///
     /// ```no_run
-    /// use m2s2_rust_vulkan::{Camera, Index, Object, Result, SpecularMaterial, Vertex, VulkanRenderer};
+    /// use m2s2_rust_vulkan::{Camera, Index, Material, Object, Result, Vertex, VulkanRenderer};
     /// use m2s2_rust_vulkan::math::Mat4;
     /// fn draw(renderer: &mut VulkanRenderer, vertices: &[Vertex], indices: &[Index], camera: Camera) -> Result<()> {
     ///     let mesh = renderer.create_mesh(vertices, indices)?;
-    ///     let objects = [Object { mesh, model: Mat4::IDENTITY, texture: None,
-    ///         specular: SpecularMaterial::default() }];
+    ///     let objects = [Object { mesh, model: Mat4::IDENTITY, material: Material::default() }];
     ///     renderer.render_objects(&objects, camera)?;
     ///     renderer.render_frame(mesh, Mat4::IDENTITY, camera)
     /// }

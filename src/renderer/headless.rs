@@ -12,6 +12,7 @@ use crate::renderer::handle;
 use crate::renderer::instance::VulkanInstance;
 use crate::renderer::instance_buffer::InstanceBuffer;
 use crate::renderer::light::{DirectionalLight, Light, PointLight};
+use crate::renderer::material::{self, Material};
 use crate::renderer::mesh::{self, MeshId, StoredMesh};
 use crate::renderer::pipeline::{GraphicsPipeline, InstanceData};
 use crate::renderer::scene::Object;
@@ -472,10 +473,10 @@ impl HeadlessRenderer {
         }
         uniform::validate_camera(&camera)?;
         for object in objects {
-            texture::validate_specular(&object.specular)?;
+            material::validate_material(&object.material)?;
             mesh::resolve_mesh(object.mesh, self.owner, &self.meshes)?;
             texture::resolve_texture_set(
-                object.texture,
+                object.material.texture,
                 self.owner,
                 &self.texture_sets,
                 self.white_texture.as_ref().unwrap().set,
@@ -523,8 +524,9 @@ impl HeadlessRenderer {
             .map(|object| {
                 InstanceData::from((
                     object.model,
-                    object.specular.color,
-                    object.specular.shininess,
+                    object.material.base_color,
+                    object.material.specular.color,
+                    object.material.specular.shininess,
                 ))
             })
             .collect();
@@ -1176,14 +1178,15 @@ mod tests {
             Object {
                 mesh: cube,
                 model: Mat4::IDENTITY,
-                texture: Some(texture),
-                specular: Default::default(),
+                material: Material {
+                    texture: Some(texture),
+                    ..Default::default()
+                },
             },
             Object {
                 mesh: ground,
                 model: Mat4::IDENTITY,
-                texture: None,
-                specular: Default::default(),
+                material: Material::default(),
             },
         ];
         let position = Vec3::new(3.0, 3.0, 5.0);
@@ -1454,8 +1457,7 @@ mod tests {
         let (mut renderer, mut objects, camera, light) = shadow_test_scene();
         let other = Object {
             mesh: objects[0].mesh,
-            texture: objects[0].texture,
-            specular: objects[0].specular,
+            material: objects[0].material,
             model: translate(&Vec3::new(-1.5, 0.0, 0.0)),
         };
         objects.insert(1, other);
@@ -1684,7 +1686,6 @@ mod tests {
     #[ignore = "needs a real Vulkan driver"]
     fn render_frame_is_deterministic_across_repeated_calls() {
         use crate::math::{to_radians, Mat4, Vec3};
-        use crate::renderer::texture::SpecularMaterial;
 
         let (vertices, indices) = lit_untextured_cube();
         let mut renderer =
@@ -1701,8 +1702,7 @@ mod tests {
         let objects = [Object {
             mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
-            texture: None,
-            specular: SpecularMaterial::default(),
+            material: Material::default(),
         }];
         let first = renderer
             .render_frame(&objects, camera, &DirectionalLight::default(), &[])
@@ -1722,7 +1722,6 @@ mod tests {
     fn self_test_scene_matches_golden_with_zero_validation_errors() {
         use crate::math::{to_radians, Mat4, Vec3};
         use crate::renderer::golden::assert_matches_golden;
-        use crate::renderer::texture::SpecularMaterial;
 
         let (vertices, indices) = lit_untextured_cube();
         let mut renderer =
@@ -1739,8 +1738,7 @@ mod tests {
         let objects = [Object {
             mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
-            texture: None,
-            specular: SpecularMaterial::default(),
+            material: Material::default(),
         }];
         let pixels = renderer
             .render_frame(&objects, camera, &DirectionalLight::default(), &[])
@@ -1775,7 +1773,6 @@ mod tests {
     fn point_light_zero_matches_baseline() {
         use crate::math::Mat4;
         use crate::renderer::golden::assert_matches_golden;
-        use crate::renderer::texture::SpecularMaterial;
 
         let (vertices, indices) = lit_untextured_cube();
         let mut renderer =
@@ -1783,8 +1780,7 @@ mod tests {
         let objects = [Object {
             mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
-            texture: None,
-            specular: SpecularMaterial::default(),
+            material: Material::default(),
         }];
         // Zero point lights: proves "zero points changes nothing" by reusing spec 013's existing
         // baseline golden rather than a new one — this scene is otherwise byte-for-byte the same as
@@ -1811,7 +1807,6 @@ mod tests {
     fn point_light_one_illuminates() {
         use crate::math::{Mat4, Vec3};
         use crate::renderer::golden::assert_matches_golden;
-        use crate::renderer::texture::SpecularMaterial;
 
         let (vertices, indices) = lit_untextured_cube();
         let mut renderer =
@@ -1819,8 +1814,7 @@ mod tests {
         let objects = [Object {
             mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
-            texture: None,
-            specular: SpecularMaterial::default(),
+            material: Material::default(),
         }];
         let point_lights = [PointLight {
             position: Vec3::new(1.5, 0.0, 0.0),
@@ -1849,7 +1843,6 @@ mod tests {
     fn point_light_colors_add() {
         use crate::math::{Mat4, Vec3};
         use crate::renderer::golden::assert_matches_golden;
-        use crate::renderer::texture::SpecularMaterial;
 
         let (vertices, indices) = lit_untextured_cube();
         let mut renderer =
@@ -1857,8 +1850,7 @@ mod tests {
         let objects = [Object {
             mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
-            texture: None,
-            specular: SpecularMaterial::default(),
+            material: Material::default(),
         }];
         // Two overlapping lights at the same position, pure red and pure blue: if contributions add
         // linearly the lit region should read magenta-ish rather than either pure color.
@@ -1896,7 +1888,6 @@ mod tests {
     fn point_light_beyond_range_contributes_zero() {
         use crate::math::{Mat4, Vec3};
         use crate::renderer::golden::assert_matches_golden;
-        use crate::renderer::texture::SpecularMaterial;
 
         let (vertices, indices) = lit_untextured_cube();
         let mut renderer =
@@ -1904,8 +1895,7 @@ mod tests {
         let objects = [Object {
             mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
-            texture: None,
-            specular: SpecularMaterial::default(),
+            material: Material::default(),
         }];
         // Far outside its own range (distance from the unit cube is ~17 units, range is 1): should
         // contribute nothing, so the frame must match the same zero-point baseline golden.
@@ -1937,7 +1927,6 @@ mod tests {
         use crate::math::{Mat4, Vec3};
         use crate::renderer::golden::assert_matches_golden;
         use crate::renderer::light::MAX_POINT_LIGHTS;
-        use crate::renderer::texture::SpecularMaterial;
 
         let (vertices, indices) = lit_untextured_cube();
         let mut renderer =
@@ -1945,8 +1934,7 @@ mod tests {
         let objects = [Object {
             mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
-            texture: None,
-            specular: SpecularMaterial::default(),
+            material: Material::default(),
         }];
         // All MAX_POINT_LIGHTS slots filled, dim and evenly spaced around the cube. If ambient were
         // wrongly multiplied by point-light count, this scene would be visibly blown out relative to
@@ -1996,8 +1984,7 @@ mod tests {
         Object {
             mesh,
             model: crate::math::translate(&crate::math::Vec3::new(x, 0.0, 0.0)),
-            texture: None,
-            specular: texture::SpecularMaterial::default(),
+            material: material::Material::default(),
         }
     }
 
@@ -2141,7 +2128,7 @@ mod tests {
             ));
         }
         let mut object = mesh_object(mesh, 0.0);
-        object.texture = Some(texture::TextureId::new(handle::next_owner_id(), 0));
+        object.material.texture = Some(texture::TextureId::new(handle::next_owner_id(), 0));
         assert!(matches!(
             renderer.render_frame(&[object], camera, &light, &[]),
             Err(VulkanError::ValidationError(_))
@@ -2426,7 +2413,6 @@ mod tests {
     fn mipmap_disabled_vs_generate_differ_at_far_camera_distance() {
         use crate::math::Mat4;
         use crate::renderer::golden::assert_matches_golden;
-        use crate::renderer::texture::SpecularMaterial;
 
         let (vertices, indices) = lit_untextured_cube();
         let checker = checker_texture(64, 4, [220, 40, 40, 255], [255, 255, 255, 255]);
@@ -2446,8 +2432,10 @@ mod tests {
         let disabled_objects = [Object {
             mesh: disabled_renderer.mesh(),
             model: Mat4::IDENTITY,
-            texture: Some(disabled_tex),
-            specular: SpecularMaterial::default(),
+            material: Material {
+                texture: Some(disabled_tex),
+                ..Default::default()
+            },
         }];
         let disabled_pixels = disabled_renderer
             .render_frame(
@@ -2474,8 +2462,10 @@ mod tests {
         let generate_objects = [Object {
             mesh: generate_renderer.mesh(),
             model: Mat4::IDENTITY,
-            texture: Some(generate_tex),
-            specular: SpecularMaterial::default(),
+            material: Material {
+                texture: Some(generate_tex),
+                ..Default::default()
+            },
         }];
         let generate_pixels = generate_renderer
             .render_frame(
@@ -2518,7 +2508,6 @@ mod tests {
     fn mipmap_generate_at_near_camera_distance_matches_golden() {
         use crate::math::Mat4;
         use crate::renderer::golden::assert_matches_golden;
-        use crate::renderer::texture::SpecularMaterial;
 
         let (vertices, indices) = lit_untextured_cube();
         let checker = checker_texture(64, 4, [220, 40, 40, 255], [255, 255, 255, 255]);
@@ -2538,8 +2527,10 @@ mod tests {
         let objects = [Object {
             mesh: renderer.mesh(),
             model: Mat4::IDENTITY,
-            texture: Some(tex),
-            specular: SpecularMaterial::default(),
+            material: Material {
+                texture: Some(tex),
+                ..Default::default()
+            },
         }];
         let pixels = renderer
             .render_frame(
@@ -2605,10 +2596,13 @@ mod tests {
                 Object {
                     mesh,
                     model: translate(&Vec3::new(x, 0.0, z)) * rotation * scale,
-                    texture: None,
-                    specular: texture::SpecularMaterial {
-                        color: Vec3::new(0.8, 0.8, 0.8),
-                        shininess: 4.0 + ((i as f32 * 12.0) % 128.0),
+                    material: Material {
+                        texture: None,
+                        base_color: Vec3::new(1.0, 1.0, 1.0),
+                        specular: texture::SpecularMaterial {
+                            color: Vec3::new(0.8, 0.8, 0.8),
+                            shininess: 4.0 + ((i as f32 * 12.0) % 128.0),
+                        },
                     },
                 }
             })
@@ -2645,8 +2639,7 @@ mod tests {
         Object {
             mesh,
             model: translate(&Vec3::new(x, 0.0, 0.0)) * Mat4::scale(Vec3::new(0.5, 0.5, 0.5)),
-            texture: None,
-            specular: texture::SpecularMaterial::default(),
+            material: material::Material::default(),
         }
     }
 
