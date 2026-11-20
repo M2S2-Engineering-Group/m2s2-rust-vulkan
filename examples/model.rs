@@ -98,6 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             model: loaded_mesh.world_transform,
             material: Material {
                 texture: loaded_mesh.texture.map(|i| texture_ids[i]),
+                base_color: loaded_mesh.base_color_factor,
                 ..Default::default()
             },
         });
