@@ -198,8 +198,18 @@ fn resolve_texture(image: &Image, ctx: &mut LoadContext) -> Result<usize> {
         Source::View { view, mime_type } => {
             let start = view.offset();
             let end = start + view.length();
+            let bytes = ctx
+                .blob
+                .get(start..end)
+                .ok_or_else(|| {
+                    VulkanError::Other(format!(
+                        "image buffer view [{start}..{end}) is out of bounds for a {}-byte glTF buffer",
+                        ctx.blob.len()
+                    ))
+                })?
+                .to_vec();
             LoadedImage {
-                bytes: ctx.blob[start..end].to_vec(),
+                bytes,
                 mime_type: mime_type.to_string(),
             }
         }
@@ -809,6 +819,44 @@ mod tests {
             err.contains("external image URIs are not supported"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn image_buffer_view_out_of_bounds_is_rejected_not_panicking() {
+        // The declared buffer byteLength is inflated well beyond the actual embedded BIN chunk
+        // (schema-valid: the image bufferView's range fits within the claimed buffer length),
+        // but the real glTF blob is shorter — simulating a malformed/truncated .glb.
+        let (bin, accessors, buffer_views) = shared_triangle_geometry();
+        let bin_len = bin.len();
+        let claimed_buffer_len = bin_len + 10_000_000;
+        let image_offset = bin_len + 5_000_000;
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] } ],
+            "scene": 0,
+            "nodes": [ { "mesh": 0 } ],
+            "meshes": [ {
+                "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3, "material": 0 } ]
+            } ],
+            "materials": [ { "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } } ],
+            "textures": [ { "source": 0 } ],
+            "images": [ { "bufferView": 4, "mimeType": "image/png" } ],
+            "accessors": accessors,
+            "bufferViews": [
+                buffer_views[0].clone(), buffer_views[1].clone(), buffer_views[2].clone(), buffer_views[3].clone(),
+                { "buffer": 0, "byteOffset": image_offset, "byteLength": 100 }
+            ],
+            "buffers": [ { "byteLength": claimed_buffer_len } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let result = super::load_gltf(&path);
+        std::fs::remove_file(&path).ok();
+
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("out of bounds"), "unexpected error: {err}");
     }
 
     #[test]
