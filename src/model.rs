@@ -441,7 +441,11 @@ mod tests {
         let result = super::load_gltf(&path);
         std::fs::remove_file(&path).ok();
 
-        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("no embedded binary chunk"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -584,5 +588,351 @@ mod tests {
         // No top-level "scene" index: falls back to the first scene (index 0), which contains
         // node 0 (mesh 0) only — not node 1's scene.
         assert_eq!(model.meshes.len(), 1);
+    }
+
+    #[test]
+    fn two_meshes_sharing_one_image_dedupe_into_one_texture() {
+        let (mut bin, accessors, buffer_views) = shared_triangle_geometry();
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        let image_offset = bin.len();
+        let png_bytes = tiny_png();
+        let image_len = png_bytes.len();
+        bin.extend_from_slice(&png_bytes);
+
+        let mut buffer_views = buffer_views;
+        buffer_views
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "buffer": 0, "byteOffset": image_offset, "byteLength": image_len }));
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0, 1] } ],
+            "scene": 0,
+            "nodes": [ { "mesh": 0 }, { "mesh": 1 } ],
+            "meshes": [
+                { "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3, "material": 0 } ] },
+                { "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3, "material": 1 } ] }
+            ],
+            // Two distinct materials, both pointing at the same (only) texture/image — proves
+            // the dedup keys off the glTF image index, not the material or texture index.
+            "materials": [
+                { "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } },
+                { "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }
+            ],
+            "textures": [ { "source": 0 } ],
+            "images": [ { "bufferView": 4, "mimeType": "image/png" } ],
+            "accessors": accessors,
+            "bufferViews": buffer_views,
+            "buffers": [ { "byteLength": bin.len() } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let model = super::load_gltf(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(model.textures.len(), 1);
+        assert_eq!(model.meshes[0].texture, Some(0));
+        assert_eq!(model.meshes[1].texture, Some(0));
+    }
+
+    #[test]
+    fn multi_primitive_mesh_is_rejected() {
+        let (bin, accessors, buffer_views) = shared_triangle_geometry();
+        let bin_len = bin.len();
+        let primitive =
+            json!({ "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3 });
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] } ],
+            "scene": 0,
+            "nodes": [ { "mesh": 0 } ],
+            "meshes": [ { "primitives": [primitive.clone(), primitive] } ],
+            "accessors": accessors,
+            "bufferViews": buffer_views,
+            "buffers": [ { "byteLength": bin_len } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let result = super::load_gltf(&path);
+        std::fs::remove_file(&path).ok();
+
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("more than one primitive"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn primitive_missing_normal_is_rejected() {
+        let (bin, accessors, buffer_views) = shared_triangle_geometry();
+        let bin_len = bin.len();
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] } ],
+            "scene": 0,
+            "nodes": [ { "mesh": 0 } ],
+            "meshes": [ {
+                "primitives": [ { "attributes": { "POSITION": 0, "TEXCOORD_0": 2 }, "indices": 3 } ]
+            } ],
+            "accessors": accessors,
+            "bufferViews": buffer_views,
+            "buffers": [ { "byteLength": bin_len } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let result = super::load_gltf(&path);
+        std::fs::remove_file(&path).ok();
+
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("missing NORMAL"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn primitive_missing_texcoord_is_rejected() {
+        let (bin, accessors, buffer_views) = shared_triangle_geometry();
+        let bin_len = bin.len();
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] } ],
+            "scene": 0,
+            "nodes": [ { "mesh": 0 } ],
+            "meshes": [ {
+                "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1 }, "indices": 3 } ]
+            } ],
+            "accessors": accessors,
+            "bufferViews": buffer_views,
+            "buffers": [ { "byteLength": bin_len } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let result = super::load_gltf(&path);
+        std::fs::remove_file(&path).ok();
+
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("missing TEXCOORD_0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn primitive_over_65535_vertices_is_rejected() {
+        // Reuses accessor 0 (positions) for both POSITION and NORMAL — legal glTF, same VEC3
+        // FLOAT shape — so only two large buffers (positions/normals, and UVs) need allocating
+        // instead of three.
+        const COUNT: usize = 65536;
+        let positions_len = COUNT * 12; // VEC3 f32
+        let uvs_len = COUNT * 8; // VEC2 f32
+        let indices_offset = positions_len + uvs_len;
+        let mut bin = vec![0u8; indices_offset + 6];
+        for (i, v) in [0u16, 1, 2].iter().enumerate() {
+            let bytes = v.to_le_bytes();
+            bin[indices_offset + i * 2] = bytes[0];
+            bin[indices_offset + i * 2 + 1] = bytes[1];
+        }
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] } ],
+            "scene": 0,
+            "nodes": [ { "mesh": 0 } ],
+            "meshes": [ {
+                "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 0, "TEXCOORD_0": 1 }, "indices": 2 } ]
+            } ],
+            "accessors": [
+                {
+                    "bufferView": 0, "componentType": 5126, "count": COUNT, "type": "VEC3",
+                    "min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]
+                },
+                { "bufferView": 1, "componentType": 5126, "count": COUNT, "type": "VEC2" },
+                { "bufferView": 2, "componentType": 5123, "count": 3, "type": "SCALAR" }
+            ],
+            "bufferViews": [
+                { "buffer": 0, "byteOffset": 0, "byteLength": positions_len, "target": 34962 },
+                { "buffer": 0, "byteOffset": positions_len, "byteLength": uvs_len, "target": 34962 },
+                { "buffer": 0, "byteOffset": indices_offset, "byteLength": 6, "target": 34963 }
+            ],
+            "buffers": [ { "byteLength": bin.len() } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let result = super::load_gltf(&path);
+        std::fs::remove_file(&path).ok();
+
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("exceeding the 65535"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn external_uri_image_is_rejected() {
+        let (bin, accessors, buffer_views) = shared_triangle_geometry();
+        let bin_len = bin.len();
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] } ],
+            "scene": 0,
+            "nodes": [ { "mesh": 0 } ],
+            "meshes": [ {
+                "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3, "material": 0 } ]
+            } ],
+            "materials": [ { "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } } ],
+            "textures": [ { "source": 0 } ],
+            "images": [ { "uri": "foo.png" } ],
+            "accessors": accessors,
+            "bufferViews": buffer_views,
+            "buffers": [ { "byteLength": bin_len } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let result = super::load_gltf(&path);
+        std::fs::remove_file(&path).ok();
+
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("external image URIs are not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn out_of_range_index_is_rejected_not_panicking() {
+        let mut bin = Vec::new();
+        for p in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for c in p {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        let normals_offset = bin.len();
+        for _ in 0..3 {
+            bin.extend_from_slice(&0.0f32.to_le_bytes());
+            bin.extend_from_slice(&0.0f32.to_le_bytes());
+            bin.extend_from_slice(&1.0f32.to_le_bytes());
+        }
+        let uvs_offset = bin.len();
+        for uv in [[0.0f32, 0.0], [1.0, 0.0], [0.0, 1.0]] {
+            for c in uv {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        let indices_offset = bin.len();
+        // Index 5 references a vertex beyond the 3 that exist.
+        for i in [0u16, 1, 5] {
+            bin.extend_from_slice(&i.to_le_bytes());
+        }
+        let indices_len = bin.len() - indices_offset;
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] } ],
+            "scene": 0,
+            "nodes": [ { "mesh": 0 } ],
+            "meshes": [ {
+                "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3 } ]
+            } ],
+            "accessors": [
+                {
+                    "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                    "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]
+                },
+                { "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3" },
+                { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" },
+                { "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }
+            ],
+            "bufferViews": [
+                { "buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962 },
+                { "buffer": 0, "byteOffset": normals_offset, "byteLength": 36, "target": 34962 },
+                { "buffer": 0, "byteOffset": uvs_offset, "byteLength": 24, "target": 34962 },
+                { "buffer": 0, "byteOffset": indices_offset, "byteLength": indices_len, "target": 34963 }
+            ],
+            "buffers": [ { "byteLength": bin.len() } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        // Must return a clean Err, not panic the test process.
+        let result = super::load_gltf(&path);
+        std::fs::remove_file(&path).ok();
+
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("out of range for"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn mismatched_attribute_accessor_counts_is_rejected() {
+        let mut bin = Vec::new();
+        for p in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for c in p {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        let normals_offset = bin.len();
+        // Only 2 normals for 3 positions.
+        for _ in 0..2 {
+            bin.extend_from_slice(&0.0f32.to_le_bytes());
+            bin.extend_from_slice(&0.0f32.to_le_bytes());
+            bin.extend_from_slice(&1.0f32.to_le_bytes());
+        }
+        let uvs_offset = bin.len();
+        for uv in [[0.0f32, 0.0], [1.0, 0.0], [0.0, 1.0]] {
+            for c in uv {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        let indices_offset = bin.len();
+        for i in [0u16, 1, 2] {
+            bin.extend_from_slice(&i.to_le_bytes());
+        }
+        let indices_len = bin.len() - indices_offset;
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] } ],
+            "scene": 0,
+            "nodes": [ { "mesh": 0 } ],
+            "meshes": [ {
+                "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3 } ]
+            } ],
+            "accessors": [
+                {
+                    "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                    "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]
+                },
+                { "bufferView": 1, "componentType": 5126, "count": 2, "type": "VEC3" },
+                { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" },
+                { "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }
+            ],
+            "bufferViews": [
+                { "buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962 },
+                { "buffer": 0, "byteOffset": normals_offset, "byteLength": 24, "target": 34962 },
+                { "buffer": 0, "byteOffset": uvs_offset, "byteLength": 24, "target": 34962 },
+                { "buffer": 0, "byteOffset": indices_offset, "byteLength": indices_len, "target": 34963 }
+            ],
+            "buffers": [ { "byteLength": bin.len() } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let result = super::load_gltf(&path);
+        std::fs::remove_file(&path).ok();
+
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("mismatched counts"), "unexpected error: {err}");
     }
 }
