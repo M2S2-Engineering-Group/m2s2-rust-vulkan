@@ -40,3 +40,18 @@ M2S2_UPDATE_GOLDEN=1 cargo test --lib renderer::headless::tests::shadow_cube_on_
 
 Then rerun the full ignored suite without the update flag using the synchronization-validation
 command above. Settings and remaining interactive verification limits are recorded in spec 017.
+
+Spec 021 adds `material_textured_tint.png` and `material_untextured_tint.png`: the same lit cube
+and camera as the self-test baseline, but with `Material.base_color` set to a non-white tint
+`(0.3, 0.6, 1.0)` — one with an explicit 1x1 white texture bound, one with no texture at all —
+proving the tint reaches the shader in both the textured and untextured paths.
+
+Regenerate only these two references deliberately:
+
+```sh
+M2S2_UPDATE_GOLDEN=1 cargo test --lib renderer::headless::tests::material_textured_tint_matches_golden -- --ignored --test-threads=1
+M2S2_UPDATE_GOLDEN=1 cargo test --lib renderer::headless::tests::material_untextured_tint_matches_golden -- --ignored --test-threads=1
+```
+
+Then rerun the full ignored suite without the update flag using the synchronization-validation
+command above.
