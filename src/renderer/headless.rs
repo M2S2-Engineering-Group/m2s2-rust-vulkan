@@ -1421,13 +1421,17 @@ mod tests {
         .unwrap();
         let depth: Vec<f32> = if format == vk::Format::D32_SFLOAT {
             bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_ne_bytes(b.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_ne_bytes(*b))
                 .collect()
         } else {
             bytes
-                .chunks_exact(2)
-                .map(|b| f32::from(u16::from_ne_bytes(b.try_into().unwrap())) / f32::from(u16::MAX))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| f32::from(u16::from_ne_bytes(*b)) / f32::from(u16::MAX))
                 .collect()
         };
         let center = (config.resolution / 2 * config.resolution + config.resolution / 2) as usize;
