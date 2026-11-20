@@ -13,6 +13,8 @@ use std::io::Cursor;
 
 // Precompiled SPIR-V, committed to the repo (see specs/001 "Decision: precompiled SPIR-V").
 // Recompile after editing: glslc shaders/triangle.vert -o shaders/triangle.vert.spv
+// These two are the SHADOWS_ENABLED-undefined variant; see CLAUDE.md's shader recompile note for
+// the second, -DSHADOWS_ENABLED-compiled pair (spec 017).
 const VERTEX_SHADER: &[u8] = include_bytes!("../../shaders/triangle.vert.spv");
 const FRAGMENT_SHADER: &[u8] = include_bytes!("../../shaders/triangle.frag.spv");
 
@@ -422,5 +424,33 @@ mod tests {
         let words = ash::util::read_spv(&mut Cursor::new(FRAGMENT_SHADER))
             .expect("fragment .spv should parse via read_spv");
         assert_eq!(words.first().copied(), Some(SPIRV_MAGIC));
+    }
+
+    #[test]
+    fn shadow_depth_vertex_spirv_parses_and_starts_with_magic() {
+        let bytes = include_bytes!("../../shaders/shadow_depth.vert.spv");
+        let words = ash::util::read_spv(&mut Cursor::new(&bytes[..]))
+            .expect("shadow_depth.vert .spv should parse via read_spv");
+        assert_eq!(words.first().copied(), Some(SPIRV_MAGIC));
+    }
+
+    #[test]
+    fn triangle_shadow_vertex_and_fragment_spirv_parse_and_start_with_magic() {
+        let v = include_bytes!("../../shaders/triangle_shadow.vert.spv");
+        let f = include_bytes!("../../shaders/triangle_shadow.frag.spv");
+        assert_eq!(
+            ash::util::read_spv(&mut Cursor::new(&v[..]))
+                .expect("triangle_shadow.vert .spv should parse via read_spv")
+                .first()
+                .copied(),
+            Some(SPIRV_MAGIC)
+        );
+        assert_eq!(
+            ash::util::read_spv(&mut Cursor::new(&f[..]))
+                .expect("triangle_shadow.frag .spv should parse via read_spv")
+                .first()
+                .copied(),
+            Some(SPIRV_MAGIC)
+        );
     }
 }
