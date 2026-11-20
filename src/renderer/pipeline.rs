@@ -96,13 +96,18 @@ fn instance_binding_description() -> vk::VertexInputBindingDescription {
 
 pub(super) struct PipelineDescription<'a> {
     pub vertex_shader: &'a [u8],
-    pub fragment_shader: &'a [u8],
+    pub fragment_shader: Option<&'a [u8]>,
     pub bindings: &'a [vk::VertexInputBindingDescription],
     pub attributes: &'a [vk::VertexInputAttributeDescription],
     pub depth_test: bool,
     pub cull_mode: vk::CullModeFlags,
     pub blend: bool,
     pub push_ranges: &'a [vk::PushConstantRange],
+}
+
+#[allow(dead_code)] // Consumed by Task 4 (depth-only pipeline)
+pub(super) fn shader_stage_count(fragment_shader: Option<&[u8]>) -> usize {
+    1 + fragment_shader.is_some() as usize
 }
 
 pub struct GraphicsPipeline {
@@ -114,7 +119,7 @@ pub struct GraphicsPipeline {
 }
 
 impl GraphicsPipeline {
-    /// `color_format` should be the swapchain's format (`VulkanSwapchain::format`); `depth_format`
+    /// `color_formats` should contain the swapchain's format (`VulkanSwapchain::format`); `depth_format`
     /// the depth attachment's (`DepthResources::format`). `set_layouts` are referenced by the
     /// pipeline layout in order, so the shader can read `set = 0`, `set = 1`, etc. (the per-frame
     /// camera uniform layout from `uniform.rs`, then the per-object texture layout from
@@ -137,12 +142,12 @@ impl GraphicsPipeline {
             .collect();
         Self::create(
             device,
-            color_format,
+            &[color_format],
             depth_format,
             set_layouts,
             PipelineDescription {
                 vertex_shader: VERTEX_SHADER,
-                fragment_shader: FRAGMENT_SHADER,
+                fragment_shader: Some(FRAGMENT_SHADER),
                 bindings: &bindings,
                 attributes: &attributes,
                 depth_test: true,
@@ -155,7 +160,7 @@ impl GraphicsPipeline {
 
     pub(super) fn create(
         device: &VulkanDevice,
-        color_format: vk::Format,
+        color_formats: &[vk::Format],
         depth_format: vk::Format,
         set_layouts: &[vk::DescriptorSetLayout],
         description: PipelineDescription<'_>,
@@ -167,29 +172,38 @@ impl GraphicsPipeline {
         // (a raw bytemuck cast would be UB on an unaligned slice).
         let vertex_code = ash::util::read_spv(&mut Cursor::new(description.vertex_shader))
             .map_err(|e| VulkanError::InitializationError(format!("bad vertex SPIR-V: {e}")))?;
-        let fragment_code = ash::util::read_spv(&mut Cursor::new(description.fragment_shader))
-            .map_err(|e| VulkanError::InitializationError(format!("bad fragment SPIR-V: {e}")))?;
 
         let vertex_module = Self::create_shader_module(device, &vertex_code)?;
         let _vertex_cleanup = super::cleanup::Cleanup::new(|| unsafe {
             device.destroy_shader_module(vertex_module, None)
         });
-        let fragment_module = Self::create_shader_module(device, &fragment_code)?;
 
-        let _fragment_cleanup = super::cleanup::Cleanup::new(|| unsafe {
-            device.destroy_shader_module(fragment_module, None)
-        });
         let entry_name = c"main";
-        let stages = [
-            vk::PipelineShaderStageCreateInfo::default()
+        let mut stages: Vec<vk::PipelineShaderStageCreateInfo> =
+            vec![vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
                 .module(vertex_module)
-                .name(entry_name),
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(fragment_module)
-                .name(entry_name),
-        ];
+                .name(entry_name)];
+
+        let fragment_module;
+        let _fragment_cleanup = if let Some(fragment_shader) = description.fragment_shader {
+            let fragment_code =
+                ash::util::read_spv(&mut Cursor::new(fragment_shader)).map_err(|e| {
+                    VulkanError::InitializationError(format!("bad fragment SPIR-V: {e}"))
+                })?;
+            fragment_module = Self::create_shader_module(device, &fragment_code)?;
+            stages.push(
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::FRAGMENT)
+                    .module(fragment_module)
+                    .name(entry_name),
+            );
+            Some(super::cleanup::Cleanup::new(|| unsafe {
+                device.destroy_shader_module(fragment_module, None)
+            }))
+        } else {
+            None
+        };
 
         // Shared construction accepts scene or text vertex layouts; the caller keeps descriptions
         // alive until create_graphics_pipelines reads them.
@@ -258,9 +272,10 @@ impl GraphicsPipeline {
 
         // Dynamic rendering: the pipeline declares the color + depth attachment *formats* it targets
         // via push_next, instead of being bound to a VkRenderPass + subpass. No .render_pass(...).
-        let color_formats = [color_format];
+        // An empty color_formats slice produces colorAttachmentCount: 0, which is the correct
+        // "depth-only, no color attachments" Vulkan configuration.
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(&color_formats)
+            .color_attachment_formats(color_formats)
             .depth_attachment_format(depth_format);
 
         let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
@@ -330,6 +345,12 @@ impl Drop for GraphicsPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shader_stage_count_is_one_without_fragment_two_with() {
+        assert_eq!(shader_stage_count(None), 1);
+        assert_eq!(shader_stage_count(Some(&[0u8; 4])), 2);
+    }
 
     #[test]
     fn instance_data_matches_shader_layout() {
