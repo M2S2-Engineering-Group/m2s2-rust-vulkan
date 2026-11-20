@@ -99,7 +99,9 @@ management their own way).
 - [x] **Mesh/texture resource handles**: renderer-owned resources with typed handles and foreign-handle
       rejection — [spec 015](specs/015-multiple-mesh-resources.md). Public buffer/image/pipeline handles
       remain outside the high-level API; unloading and slot reuse are deferred.
-- [ ] **Model loading**: glTF (preferred — PBR-friendly material model) and/or OBJ
+- [x] **Model loading**: glTF geometry/transform/texture-reference loading (no scene graph, no
+      material system, no animation) — [spec 020](specs/020-model-loading.md). Proven against a
+      20-part externally authored mesh. OBJ remains a future option per "and/or".
 - [ ] **Material system**: decouple "what a shader needs" from "what an asset provides"
 - [ ] **Scene graph**: hierarchical transforms — likely belongs to the *caller*, not this library, given the
       no-ownership architecture; decide explicitly and document it rather than let it default
