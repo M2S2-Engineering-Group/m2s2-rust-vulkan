@@ -18,6 +18,13 @@ use std::io::Cursor;
 const VERTEX_SHADER: &[u8] = include_bytes!("../../shaders/triangle.vert.spv");
 const FRAGMENT_SHADER: &[u8] = include_bytes!("../../shaders/triangle.frag.spv");
 
+// Shadow-pass shaders (spec 017). SHADOW_VERTEX_SHADER/SHADOW_FRAGMENT_SHADER are the main scene
+// pipeline's SHADOWS_ENABLED-compiled variant (samples the shadow map via set 3);
+// SHADOW_DEPTH_VERTEX_SHADER is the depth-only shadow pass itself (no fragment shader).
+const SHADOW_VERTEX_SHADER: &[u8] = include_bytes!("../../shaders/triangle_shadow.vert.spv");
+const SHADOW_FRAGMENT_SHADER: &[u8] = include_bytes!("../../shaders/triangle_shadow.frag.spv");
+const SHADOW_DEPTH_VERTEX_SHADER: &[u8] = include_bytes!("../../shaders/shadow_depth.vert.spv");
+
 /// Per-instance GPU payload for instanced draws (plan 016): one row-major `Mat4` model transform,
 /// unpacked into four separate `vec4`s (`model_row0..3`) because the GLSL side reads four distinct
 /// `vec4` instance-rate attribute locations, not one `mat4` attribute, plus the specular
@@ -96,6 +103,25 @@ fn instance_binding_description() -> vk::VertexInputBindingDescription {
         .input_rate(vk::VertexInputRate::INSTANCE)
 }
 
+/// The scene vertex-input layout (per-vertex `Vertex` binding 0 + per-instance `InstanceData`
+/// binding 1), shared by every scene-geometry pipeline variant -- the normal and shadow-enabled
+/// main pipelines and the depth-only shadow pipeline all draw the same geometry through the same
+/// instance buffer, so this is the one place that layout is assembled.
+fn scene_bindings_and_attributes() -> (
+    [vk::VertexInputBindingDescription; 2],
+    Vec<vk::VertexInputAttributeDescription>,
+) {
+    let bindings = [
+        Vertex::binding_description(),
+        instance_binding_description(),
+    ];
+    let attributes = Vertex::attribute_descriptions()
+        .into_iter()
+        .chain(instance_attribute_descriptions())
+        .collect();
+    (bindings, attributes)
+}
+
 pub(super) struct PipelineDescription<'a> {
     pub vertex_shader: &'a [u8],
     pub fragment_shader: Option<&'a [u8]>,
@@ -134,14 +160,7 @@ impl GraphicsPipeline {
         depth_format: vk::Format,
         set_layouts: &[vk::DescriptorSetLayout],
     ) -> Result<Self> {
-        let bindings = [
-            Vertex::binding_description(),
-            instance_binding_description(),
-        ];
-        let attributes: Vec<vk::VertexInputAttributeDescription> = Vertex::attribute_descriptions()
-            .into_iter()
-            .chain(instance_attribute_descriptions())
-            .collect();
+        let (bindings, attributes) = scene_bindings_and_attributes();
         Self::create(
             device,
             &[color_format],
@@ -150,6 +169,65 @@ impl GraphicsPipeline {
             PipelineDescription {
                 vertex_shader: VERTEX_SHADER,
                 fragment_shader: Some(FRAGMENT_SHADER),
+                bindings: &bindings,
+                attributes: &attributes,
+                depth_test: true,
+                cull_mode: vk::CullModeFlags::BACK,
+                blend: false,
+                push_ranges: &[],
+            },
+        )
+    }
+
+    /// The shadow-enabled main-pipeline variant: same vertex-input layout and set 0/1/2 (camera,
+    /// texture, light) as `new`, plus an additional set (the shadow sampler + light-VP UBO --
+    /// `ShadowResources::descriptor_set_layout`) and shaders compiled with `SHADOWS_ENABLED`
+    /// defined (`triangle_shadow.{vert,frag}.spv`). `VulkanRenderer` selects this over `new`
+    /// whenever a directional shadow is currently configured.
+    pub(super) fn new_with_shadow(
+        device: &VulkanDevice,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+        set_layouts: &[vk::DescriptorSetLayout],
+    ) -> Result<Self> {
+        let (bindings, attributes) = scene_bindings_and_attributes();
+        Self::create(
+            device,
+            &[color_format],
+            depth_format,
+            set_layouts,
+            PipelineDescription {
+                vertex_shader: SHADOW_VERTEX_SHADER,
+                fragment_shader: Some(SHADOW_FRAGMENT_SHADER),
+                bindings: &bindings,
+                attributes: &attributes,
+                depth_test: true,
+                cull_mode: vk::CullModeFlags::BACK,
+                blend: false,
+                push_ranges: &[],
+            },
+        )
+    }
+
+    /// The depth-only shadow pass's own pipeline: draws the same scene geometry (same
+    /// vertex-input layout as `new`/`new_with_shadow`, through the same instance buffer) into the
+    /// shadow map, with no fragment shader and no color attachments (`color_formats: &[]` -- see
+    /// `create`'s dynamic-rendering-attachment-count handling below). Back-face culling, per spec
+    /// 017's initial bias-direction choice.
+    pub(super) fn new_shadow_depth(
+        device: &VulkanDevice,
+        depth_format: vk::Format,
+        set_layouts: &[vk::DescriptorSetLayout],
+    ) -> Result<Self> {
+        let (bindings, attributes) = scene_bindings_and_attributes();
+        Self::create(
+            device,
+            &[],
+            depth_format,
+            set_layouts,
+            PipelineDescription {
+                vertex_shader: SHADOW_DEPTH_VERTEX_SHADER,
+                fragment_shader: None,
                 bindings: &bindings,
                 attributes: &attributes,
                 depth_test: true,
@@ -249,15 +327,23 @@ impl GraphicsPipeline {
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);
 
-        let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
-            .blend_enable(description.blend)
-            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
-            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-            .color_blend_op(vk::BlendOp::ADD)
-            .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-            .alpha_blend_op(vk::BlendOp::ADD)
-            .color_write_mask(vk::ColorComponentFlags::RGBA)];
+        // Vulkan requires colorBlendAttachmentCount to equal the dynamic-rendering
+        // colorAttachmentCount (color_formats.len()) exactly -- the depth-only shadow pipeline
+        // passes an empty color_formats, so it needs zero blend-attachment entries here, not one.
+        let color_blend_attachments: Vec<vk::PipelineColorBlendAttachmentState> =
+            if color_formats.is_empty() {
+                Vec::new()
+            } else {
+                vec![vk::PipelineColorBlendAttachmentState::default()
+                    .blend_enable(description.blend)
+                    .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+                    .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                    .color_blend_op(vk::BlendOp::ADD)
+                    .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                    .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                    .alpha_blend_op(vk::BlendOp::ADD)
+                    .color_write_mask(vk::ColorComponentFlags::RGBA)]
+            };
         let color_blending =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
 
