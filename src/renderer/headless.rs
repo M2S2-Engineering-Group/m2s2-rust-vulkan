@@ -2561,9 +2561,13 @@ mod tests {
         let (vertices, indices) = lit_untextured_cube();
         let mut renderer =
             HeadlessRenderer::new((64, 64), &vertices, &indices).expect("headless renderer");
+        // Non-white texture (not a flat [255,255,255,255] sample) so this golden actually proves
+        // the tint multiplies into the sampled texel rather than merely replacing it -- a fragment
+        // shader that dropped the `texture(tex, fragUV)` factor from albedo would pass an
+        // all-white-texture golden unchanged, but not this one.
         let tex = renderer
-            .create_texture(&[255, 255, 255, 255], 1, 1)
-            .expect("white texture upload");
+            .create_texture(&[200, 150, 100, 255], 1, 1)
+            .expect("textured upload");
         let camera = uniform::Camera {
             view: crate::math::look_at(
                 &Vec3::new(2.0, 2.0, 2.0),
