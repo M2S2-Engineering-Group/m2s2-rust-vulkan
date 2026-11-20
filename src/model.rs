@@ -935,4 +935,22 @@ mod tests {
         let err = result.err().unwrap().to_string();
         assert!(err.contains("mismatched counts"), "unexpected error: {err}");
     }
+
+    #[test]
+    fn mecha_ziu_glb_loads_all_twenty_meshes_and_one_shared_texture() {
+        // CARGO_MANIFEST_DIR anchors this to the crate root regardless of the CWD `cargo test`
+        // happens to be invoked from.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/assets/mecha_ziu/MechaZiu.glb");
+        let model = super::load_gltf(&path).unwrap();
+
+        assert_eq!(model.meshes.len(), 20);
+        assert_eq!(model.textures.len(), 1); // every sub-mesh shares the one ziu.tga-derived PNG
+        assert!(model.meshes.iter().all(|m| m.texture == Some(0)));
+        let total_vertices: usize = model.meshes.iter().map(|m| m.vertices.len()).sum();
+        // <= the original master vert count (3785): the per-submesh remap can only reduce this
+        // (verts shared across triangles within one submesh dedupe into fewer unique local
+        // verts), never increase it.
+        assert!(total_vertices > 0 && total_vertices <= 3785);
+    }
 }
