@@ -102,7 +102,9 @@ management their own way).
 - [x] **Model loading**: glTF geometry/transform/texture-reference loading (no scene graph, no
       material system, no animation) — [spec 020](specs/020-model-loading.md). Proven against a
       20-part externally authored mesh. OBJ remains a future option per "and/or".
-- [ ] **Material system**: decouple "what a shader needs" from "what an asset provides"
+- [x] **Material system**: `Material { texture, base_color, specular }` on `Object`; glTF's
+      `baseColorFactor` now surfaces through `LoadedMesh` — [spec 021](specs/021-material-system.md).
+      Metallic/roughness/emissive/normal maps/alpha remain a future PBR-materials spec.
 - [ ] **Scene graph**: hierarchical transforms — likely belongs to the *caller*, not this library, given the
       no-ownership architecture; decide explicitly and document it rather than let it default
 - [ ] **Frustum culling**: basic visibility culling before draw submission

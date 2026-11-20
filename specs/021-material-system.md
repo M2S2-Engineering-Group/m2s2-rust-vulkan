@@ -1,6 +1,7 @@
 # 021: Material system
 
-**Status**: Draft for review. Not implemented.
+**Status**: Implemented; unit tests and real-hardware GPU golden-image acceptance verified on
+Apple M5 / MoltenVK (2026-11-20).
 **Roadmap item**: Phase 3 "Material system: decouple 'what a shader needs' from 'what an asset
 provides'".
 **Dependencies**: Spec 010's texture creation/`TextureId`; spec 013's `SpecularMaterial`/Blinn-Phong
@@ -135,4 +136,37 @@ subset of the bound vertex-input attributes (precedent: it already omits locatio
 
 ## Outcome
 
-(Filled in after implementation.)
+Implemented as specified. `Material { texture: Option<TextureId>, base_color: Vec3, specular:
+SpecularMaterial }` replaces `Object`'s separate `texture`/`specular` fields, with a
+`validate_material` that delegates specular validation and additionally rejects a non-finite or
+negative `base_color` component. `src/model.rs`'s `LoadedMesh` gained `base_color_factor: Vec3`,
+read from `pbr_metallic_roughness().base_color_factor()` — the same accessor call already handles
+"explicit factor", "material present but factor omitted" (glTF's own `[1,1,1,1]` default), and "no
+material at all" identically, so no extra branching was needed. `examples/model.rs` wires
+`loaded_mesh.base_color_factor` straight into each `Object`'s `Material`, closing the real gap this
+spec targeted: an untextured, tinted glTF material no longer silently renders plain white.
+
+`InstanceData` (`pipeline.rs`) gained a sixth per-instance `vec4` (`base_color`, `xyz` = tint, `w`
+unused padding — same convention as `specular`) at vertex-input location 9, growing the struct from
+80 to 96 bytes. `triangle.vert`/`triangle.frag` (both the plain and `-DSHADOWS_ENABLED` variants, all
+four `.spv` outputs recompiled) gained an unconditional `fragBaseColor` varying at location 5, with
+`SHADOWS_ENABLED`'s `fragLightSpacePos` shifted to location 6; the fragment shader's albedo
+computation gained one multiply by `fragBaseColor.rgb`. `shadow_depth.vert` needed no change, per
+the spec's own precedent (a vertex shader may bind a subset of the available per-instance
+attributes).
+
+Both open questions resolved during implementation: `base_color` uses a `vec4` (matching
+`specular`'s packing for consistency, `w` genuinely unused), and `examples/cube.rs` kept both cubes
+at the neutral default tint — no cosmetic demonstration was added, since the spec's own non-goal
+("no visual change to `cube.rs`") made that the simpler, lower-risk choice.
+
+Two new committed goldens (`material_textured_tint.png`, `material_untextured_tint.png`) prove the
+tint reaches the shader in both the textured and untextured paths. Confirmed on real hardware (Apple
+M5): every pre-existing golden PNG remained byte-identical after the `Object`/`InstanceData` shape
+change (`git diff --stat testdata/golden/` showed only the two new files, zero existing-file diffs),
+and the full ignored GPU suite (34 tests) passed with
+`VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT` enabled. A test
+(`batched_objects_keep_their_own_distinct_base_color`, added to this
+spec's own plan during self-review) confirms the spec's batching-distinctness requirement: two
+objects sharing mesh and texture still batch into one instanced draw call, and each instance keeps
+its own `base_color` rather than collapsing to a shared value.
