@@ -21,6 +21,7 @@ pub(crate) mod mip_readback;
 pub(crate) mod per_frame_uniform;
 pub mod pipeline;
 pub mod scene;
+pub mod shadow;
 pub(crate) mod submission;
 pub mod swapchain;
 pub mod text;

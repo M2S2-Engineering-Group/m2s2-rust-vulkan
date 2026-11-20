@@ -8,6 +8,7 @@ pub use renderer::diagnostics::{Diagnostics, RenderStatus, RendererStats};
 pub use renderer::light::{DirectionalLight, PointLight, MAX_POINT_LIGHTS};
 pub use renderer::mesh::MeshId;
 pub use renderer::scene::Object;
+pub use renderer::shadow::DirectionalShadow;
 pub use renderer::text::TextDraw;
 pub use renderer::texture::{Mipmaps, SpecularMaterial, TextureId, TextureOptions};
 pub use renderer::uniform::Camera;
