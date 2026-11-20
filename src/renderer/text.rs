@@ -165,18 +165,19 @@ fn text_pipeline(
     ];
     GraphicsPipeline::create(
         device,
-        color,
+        &[color],
         depth,
         &[layout],
         PipelineDescription {
             vertex_shader: include_bytes!("../../shaders/text.vert.spv"),
-            fragment_shader: include_bytes!("../../shaders/text.frag.spv"),
+            fragment_shader: Some(include_bytes!("../../shaders/text.frag.spv")),
             bindings: &[vk::VertexInputBindingDescription::default()
                 .binding(0)
                 .stride(std::mem::size_of::<TextVertex>() as u32)
                 .input_rate(vk::VertexInputRate::VERTEX)],
             attributes: &attributes,
             depth_test: false,
+            depth_bias: false,
             cull_mode: vk::CullModeFlags::NONE,
             blend: true,
             push_ranges: &[],

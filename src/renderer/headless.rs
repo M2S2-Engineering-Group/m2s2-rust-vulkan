@@ -15,6 +15,7 @@ use crate::renderer::light::{DirectionalLight, Light, PointLight};
 use crate::renderer::mesh::{self, MeshId, StoredMesh};
 use crate::renderer::pipeline::{GraphicsPipeline, InstanceData};
 use crate::renderer::scene::Object;
+use crate::renderer::shadow::{self, DirectionalShadow, ShadowResources};
 use crate::renderer::submission::{SubmitState, SubmitStep};
 use crate::renderer::text::{self, TextDraw, TextRenderer, TextVertex};
 use crate::renderer::texture::{self, StoredTexture, TextureId, TextureOptions};
@@ -250,6 +251,11 @@ pub(crate) struct HeadlessRenderer {
     // visual match.
     scene_draw_calls: usize,
     scene_instances: usize,
+    shadow: Option<ShadowResources>,
+    shadow_pipeline: Option<GraphicsPipeline>,
+    shadow_config: Option<DirectionalShadow>,
+    shadow_resolution: Option<u32>,
+    shadow_draw_calls: usize,
 }
 
 impl HeadlessRenderer {
@@ -378,7 +384,60 @@ impl HeadlessRenderer {
             terminal: false,
             scene_draw_calls: 0,
             scene_instances: 0,
+            shadow: None,
+            shadow_pipeline: None,
+            shadow_config: None,
+            shadow_resolution: None,
+            shadow_draw_calls: 0,
         })
+    }
+
+    pub(crate) fn set_directional_shadow(
+        &mut self,
+        config: Option<DirectionalShadow>,
+    ) -> Result<()> {
+        if let Some(config) = &config {
+            shadow::validate_device_shadow(config, &self.instance, &self.device)?;
+        }
+        self.shadow_config = config;
+        Ok(())
+    }
+
+    fn apply_shadow_config(&mut self) -> Result<()> {
+        let requested = self.shadow_config.map(|config| config.resolution);
+        if requested == self.shadow_resolution {
+            return Ok(());
+        }
+        // Every headless submission has already completed before render_frame returns.
+        let replacement = shadow::ShadowReplacement::new(
+            &self.device,
+            &self.instance,
+            &mut self.allocator,
+            requested,
+            (
+                self.target.as_ref().unwrap().format(),
+                self.depth.as_ref().unwrap().format(),
+            ),
+            [
+                self.uniforms.as_ref().unwrap().descriptor_set_layout(),
+                self.texture_set_layout,
+                self.light.as_ref().unwrap().descriptor_set_layout(),
+            ],
+        )?;
+        drop(ManuallyDrop::into_inner(std::mem::replace(
+            &mut self.pipeline,
+            ManuallyDrop::new(replacement.scene_pipeline),
+        )));
+        drop(std::mem::replace(
+            &mut self.shadow_pipeline,
+            replacement.depth_pipeline,
+        ));
+        if let Some(old) = self.shadow.take() {
+            old.destroy(&self.device, &mut self.allocator);
+        }
+        self.shadow = replacement.resources;
+        self.shadow_resolution = requested;
+        Ok(())
     }
 
     /// Records a one-shot command buffer that draws `objects` under `camera` into the owned
@@ -421,6 +480,10 @@ impl HeadlessRenderer {
                 &self.texture_sets,
                 self.white_texture.as_ref().unwrap().set,
             )?;
+        }
+        self.apply_shadow_config()?;
+        if let (Some(shadow), Some(config)) = (&mut self.shadow, self.shadow_config) {
+            shadow.update(0, config.light_view_proj)?;
         }
         let target = self.target.as_ref().unwrap();
         text::layout_text(draws, target.extent(), &mut self.text_vertices)?;
@@ -525,6 +588,27 @@ impl HeadlessRenderer {
             )
             .map_err(VulkanError::from)?;
 
+            self.shadow_draw_calls = if let (Some(shadow), Some(pipeline), Some(config)) =
+                (&mut self.shadow, &self.shadow_pipeline, self.shadow_config)
+            {
+                command::record_shadow_pass(
+                    dev,
+                    cmd,
+                    pipeline,
+                    shadow,
+                    0,
+                    config,
+                    objects,
+                    self.owner,
+                    &self.meshes,
+                    &self.texture_sets,
+                    self.white_texture.as_ref().unwrap().set,
+                    self.instance_buffer.as_ref().unwrap().buffer(0),
+                )
+            } else {
+                0
+            };
+
             let to_color = vk::ImageMemoryBarrier::default()
                 .src_access_mask(src_access)
                 .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
@@ -626,6 +710,17 @@ impl HeadlessRenderer {
                     .descriptor_set(0)],
                 &[],
             );
+
+            if let Some(shadow) = &self.shadow {
+                dev.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline_layout,
+                    3,
+                    &[shadow.descriptor_set(0)],
+                    &[],
+                );
+            }
 
             let viewport = vk::Viewport {
                 x: 0.0,
@@ -774,6 +869,10 @@ impl HeadlessRenderer {
                 "headless render fence wait could not confirm completion: {:?}",
                 wait.err()
             )));
+        }
+
+        if let Some(shadow) = &mut self.shadow {
+            shadow.mark_used(0);
         }
 
         let byte_len = extent.width as usize * extent.height as usize * 4;
@@ -964,6 +1063,8 @@ impl Drop for HeadlessRenderer {
     fn drop(&mut self) {
         if self.terminal {
             // Native parents are ManuallyDrop; retain every dependent allocation too.
+            std::mem::forget(self.shadow.take());
+            std::mem::forget(self.shadow_pipeline.take());
             std::mem::forget(self.uniforms.take());
             std::mem::forget(self.light.take());
             std::mem::forget(self.instance_buffer.take());
@@ -982,6 +1083,10 @@ impl Drop for HeadlessRenderer {
                 text.destroy(&self.device, &mut self.allocator);
             }
             ManuallyDrop::drop(&mut self.pipeline);
+            drop(self.shadow_pipeline.take());
+            if let Some(shadow) = self.shadow.take() {
+                shadow.destroy(&self.device, &mut self.allocator);
+            }
             if let Some(light) = self.light.take() {
                 light.destroy(&self.device, &mut self.allocator);
             }
@@ -1019,6 +1124,390 @@ impl Drop for HeadlessRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SHADOW_TEST_EXTENT: u32 = 96;
+    const SHADOW_TEST_RESOLUTION: u32 = 256;
+
+    fn shadow_test_config() -> DirectionalShadow {
+        use crate::math::{look_at, perspective, to_radians, Vec3};
+        DirectionalShadow {
+            light_view_proj: perspective(to_radians(70.0), 1.0, 0.1, 20.0)
+                * look_at(
+                    &Vec3::new(3.0, 6.0, 4.0),
+                    &Vec3::new(0.0, 0.0, 0.0),
+                    &Vec3::new(0.0, 1.0, 0.0),
+                ),
+            resolution: SHADOW_TEST_RESOLUTION,
+            constant_bias: 1.25,
+            slope_bias: 1.75,
+        }
+    }
+
+    fn shadow_test_scene() -> (
+        HeadlessRenderer,
+        Vec<Object>,
+        uniform::Camera,
+        DirectionalLight,
+    ) {
+        let _ = env_logger::builder().is_test(true).try_init();
+        use crate::math::{look_at, perspective, to_radians, Mat4, Vec2, Vec3};
+        let mut renderer =
+            HeadlessRenderer::new_empty((SHADOW_TEST_EXTENT, SHADOW_TEST_EXTENT)).unwrap();
+        let (vertices, indices) = lit_untextured_cube();
+        let cube = renderer.create_mesh(&vertices, &indices).unwrap();
+        let corners = [
+            [-3.0, -0.8, 3.0],
+            [3.0, -0.8, 3.0],
+            [3.0, -0.8, -3.0],
+            [-3.0, -0.8, -3.0],
+        ];
+        let plane = corners.map(|p| Vertex {
+            position: Vec3::new(p[0], p[1], p[2]),
+            color: Vec3::new(0.8, 0.8, 0.8),
+            uv: Vec2::new(0.0, 0.0),
+            normal: Vec3::new(0.0, 1.0, 0.0),
+        });
+        let ground = renderer.create_mesh(&plane, &[0, 1, 2, 2, 3, 0]).unwrap();
+        // A real texture exercises the shadow pass's resolver, even though it never samples albedo.
+        let texture = renderer
+            .create_texture(&[255, 255, 255, 255], 1, 1)
+            .unwrap();
+        let objects = vec![
+            Object {
+                mesh: cube,
+                model: Mat4::IDENTITY,
+                texture: Some(texture),
+                specular: Default::default(),
+            },
+            Object {
+                mesh: ground,
+                model: Mat4::IDENTITY,
+                texture: None,
+                specular: Default::default(),
+            },
+        ];
+        let position = Vec3::new(3.0, 3.0, 5.0);
+        let camera = uniform::Camera {
+            view: look_at(
+                &position,
+                &Vec3::new(0.0, -0.3, 0.0),
+                &Vec3::new(0.0, 1.0, 0.0),
+            ),
+            proj: perspective(to_radians(50.0), 1.0, 0.1, 20.0),
+            position,
+        };
+        let light = DirectionalLight {
+            direction: Vec3::new(-3.0, -6.0, -4.0),
+            color: Vec3::new(0.8, 0.8, 0.8),
+            ambient: Vec3::new(0.1, 0.1, 0.1),
+        };
+        (renderer, objects, camera, light)
+    }
+
+    fn render_shadow_scene(
+        renderer: &mut HeadlessRenderer,
+        objects: &[Object],
+        camera: uniform::Camera,
+        light: &DirectionalLight,
+    ) -> Vec<u8> {
+        let pixels = renderer.render_frame(objects, camera, light, &[]).unwrap();
+        assert!(!renderer.terminal);
+        assert_eq!(renderer.validation_error_count(), 0);
+        pixels
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver"]
+    fn shadow_enable_reuse_resolution_update_and_disable_restore_baseline() {
+        let (mut renderer, objects, camera, light) = shadow_test_scene();
+        let baseline = render_shadow_scene(&mut renderer, &objects, camera, &light);
+        let mut config = shadow_test_config();
+        renderer.set_directional_shadow(Some(config)).unwrap();
+        let enabled = render_shadow_scene(&mut renderer, &objects, camera, &light);
+        assert_ne!(
+            baseline, enabled,
+            "a caster must change the receiver's lighting"
+        );
+        assert_eq!(
+            enabled,
+            render_shadow_scene(&mut renderer, &objects, camera, &light)
+        );
+        let image = renderer.shadow.as_ref().unwrap().image(0);
+        config.constant_bias += 0.25;
+        renderer.set_directional_shadow(Some(config)).unwrap();
+        render_shadow_scene(&mut renderer, &objects, camera, &light);
+        assert_eq!(
+            image,
+            renderer.shadow.as_ref().unwrap().image(0),
+            "bias changes reuse resources"
+        );
+        config.resolution *= 2;
+        renderer.set_directional_shadow(Some(config)).unwrap();
+        render_shadow_scene(&mut renderer, &objects, camera, &light);
+        assert_ne!(image, renderer.shadow.as_ref().unwrap().image(0));
+        renderer.set_directional_shadow(None).unwrap();
+        assert_eq!(
+            baseline,
+            render_shadow_scene(&mut renderer, &objects, camera, &light)
+        );
+        assert!(renderer.shadow.is_none());
+        assert_eq!(renderer.shadow_draw_calls, 0);
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver"]
+    fn shadow_rejection_preserves_prior_configuration_and_output() {
+        let (mut renderer, objects, camera, light) = shadow_test_scene();
+        let config = shadow_test_config();
+        renderer.set_directional_shadow(Some(config)).unwrap();
+        let baseline = render_shadow_scene(&mut renderer, &objects, camera, &light);
+        let image = renderer.shadow.as_ref().unwrap().image(0);
+        for resolution in [0, u32::MAX] {
+            assert!(renderer
+                .set_directional_shadow(Some(DirectionalShadow {
+                    resolution,
+                    ..config
+                }))
+                .is_err());
+            assert_eq!(
+                renderer.shadow_config.unwrap().resolution,
+                config.resolution
+            );
+            assert_eq!(
+                baseline,
+                render_shadow_scene(&mut renderer, &objects, camera, &light)
+            );
+            assert_eq!(image, renderer.shadow.as_ref().unwrap().image(0));
+        }
+        let mut invalid = config;
+        invalid.slope_bias = f32::NAN;
+        assert!(renderer.set_directional_shadow(Some(invalid)).is_err());
+        assert_eq!(
+            baseline,
+            render_shadow_scene(&mut renderer, &objects, camera, &light)
+        );
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver"]
+    fn shadow_replacement_failure_retains_live_owners() {
+        let (mut renderer, objects, camera, light) = shadow_test_scene();
+        renderer
+            .set_directional_shadow(Some(shadow_test_config()))
+            .unwrap();
+        let baseline = render_shadow_scene(&mut renderer, &objects, camera, &light);
+        let image = renderer.shadow.as_ref().unwrap().image(0);
+        let pipeline = renderer.pipeline.pipeline;
+        // Exercise the shared production replacement boundary with a deterministically unsupported
+        // image extent. There is no allocator fault-injection backend in this project.
+        let failed = shadow::ShadowReplacement::new(
+            &renderer.device,
+            &renderer.instance,
+            &mut renderer.allocator,
+            Some(u32::MAX),
+            (
+                renderer.target.as_ref().unwrap().format(),
+                renderer.depth.as_ref().unwrap().format(),
+            ),
+            [
+                renderer.uniforms.as_ref().unwrap().descriptor_set_layout(),
+                renderer.texture_set_layout,
+                renderer.light.as_ref().unwrap().descriptor_set_layout(),
+            ],
+        );
+        assert!(failed.is_err());
+        assert_eq!(image, renderer.shadow.as_ref().unwrap().image(0));
+        assert_eq!(pipeline, renderer.pipeline.pipeline);
+        assert_eq!(
+            baseline,
+            render_shadow_scene(&mut renderer, &objects, camera, &light)
+        );
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver; compares directional shadow acceptance goldens"]
+    fn shadow_cube_on_plane_matches_goldens() {
+        let (mut renderer, objects, camera, light) = shadow_test_scene();
+        let disabled = render_shadow_scene(&mut renderer, &objects, camera, &light);
+        renderer
+            .set_directional_shadow(Some(shadow_test_config()))
+            .unwrap();
+        let enabled = render_shadow_scene(&mut renderer, &objects, camera, &light);
+        for (name, pixels) in [
+            ("shadow_disabled.png", disabled),
+            ("shadow_cube_on_plane.png", enabled),
+        ] {
+            super::super::golden::assert_matches_golden(
+                &pixels,
+                SHADOW_TEST_EXTENT,
+                SHADOW_TEST_EXTENT,
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("testdata/golden")
+                    .join(name),
+                2,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver"]
+    fn shadow_outside_frustum_and_ambient_and_point_lights_remain_unshadowed() {
+        use crate::math::{translate, Mat4, Vec3};
+        let (mut renderer, objects, camera, mut light) = shadow_test_scene();
+        let baseline = render_shadow_scene(&mut renderer, &objects, camera, &light);
+        let mut config = shadow_test_config();
+        // Move every receiver outside the light volume without moving the main camera or objects.
+        config.light_view_proj = translate(&Vec3::new(100.0, 0.0, 0.0)) * Mat4::IDENTITY;
+        renderer.set_directional_shadow(Some(config)).unwrap();
+        assert_eq!(
+            baseline,
+            render_shadow_scene(&mut renderer, &objects, camera, &light)
+        );
+        light.color = Vec3::new(0.0, 0.0, 0.0);
+        let points = [PointLight {
+            position: Vec3::new(1.0, 2.0, 1.0),
+            color: Vec3::new(1.0, 0.5, 0.3),
+            range: 8.0,
+        }];
+        renderer.set_directional_shadow(None).unwrap();
+        let unshadowed = renderer
+            .render_frame(&objects, camera, &light, &points)
+            .unwrap();
+        renderer
+            .set_directional_shadow(Some(shadow_test_config()))
+            .unwrap();
+        assert_eq!(
+            unshadowed,
+            renderer
+                .render_frame(&objects, camera, &light, &points)
+                .unwrap()
+        );
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver"]
+    fn shadow_depth_contains_caster_and_far_clear_background() {
+        use super::super::image_readback::{read_back_image, ImageReadback};
+        let (mut renderer, objects, camera, light) = shadow_test_scene();
+        let config = shadow_test_config();
+        renderer.set_directional_shadow(Some(config)).unwrap();
+        // Render only the centered cube so the map has a known empty background.
+        render_shadow_scene(&mut renderer, &objects[..1], camera, &light);
+        let shadow = renderer.shadow.as_ref().unwrap();
+        let format = shadow.format();
+        eprintln!(
+            "shadow depth readback: {format:?}, resolution {}, bias {}/{}",
+            config.resolution, config.constant_bias, config.slope_bias
+        );
+        let bytes = read_back_image(
+            &renderer.device,
+            &mut renderer.allocator,
+            shadow.image(0),
+            ImageReadback {
+                level: 0,
+                width: config.resolution,
+                height: config.resolution,
+                bytes_per_texel: if format == vk::Format::D32_SFLOAT {
+                    4
+                } else {
+                    2
+                },
+                aspect: vk::ImageAspectFlags::DEPTH,
+                layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            },
+        )
+        .unwrap();
+        let depth: Vec<f32> = if format == vk::Format::D32_SFLOAT {
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_ne_bytes(*b))
+                .collect()
+        } else {
+            bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| f32::from(u16::from_ne_bytes(*b)) / f32::from(u16::MAX))
+                .collect()
+        };
+        let center = (config.resolution / 2 * config.resolution + config.resolution / 2) as usize;
+        assert!(
+            depth[center] > 0.0 && depth[center] < 1.0,
+            "center must contain the caster, got {}",
+            depth[center]
+        );
+        assert_eq!(
+            depth[0], 1.0,
+            "empty corner must retain the far clear value"
+        );
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "needs a real Vulkan driver"]
+    fn shadow_instancing_text_and_moving_light_reuse_resources() {
+        use crate::math::{look_at, perspective, to_radians, translate, Vec2, Vec3, Vec4};
+        let (mut renderer, mut objects, camera, light) = shadow_test_scene();
+        let other = Object {
+            mesh: objects[0].mesh,
+            texture: objects[0].texture,
+            specular: objects[0].specular,
+            model: translate(&Vec3::new(-1.5, 0.0, 0.0)),
+        };
+        objects.insert(1, other);
+        let mut config = shadow_test_config();
+        renderer.set_directional_shadow(Some(config)).unwrap();
+        let baseline = render_shadow_scene(&mut renderer, &objects, camera, &light);
+        assert_eq!(renderer.scene_draw_calls(), 2);
+        assert_eq!(renderer.shadow_draw_calls, renderer.scene_draw_calls());
+        assert_eq!(renderer.scene_instances(), 3);
+        let image = renderer.shadow.as_ref().unwrap().image(0);
+        config.light_view_proj = perspective(to_radians(70.0), 1.0, 0.1, 20.0)
+            * look_at(
+                &Vec3::new(-3.0, 6.0, 4.0),
+                &Vec3::new(0.0, 0.0, 0.0),
+                &Vec3::new(0.0, 1.0, 0.0),
+            );
+        renderer.set_directional_shadow(Some(config)).unwrap();
+        let moved_light = DirectionalLight {
+            direction: Vec3::new(3.0, -6.0, -4.0),
+            ..light
+        };
+        let moved = render_shadow_scene(&mut renderer, &objects, camera, &moved_light);
+        assert_ne!(baseline, moved);
+        assert_eq!(image, renderer.shadow.as_ref().unwrap().image(0));
+        let position = Vec3::new(-3.0, 3.0, 5.0);
+        let moved_camera = uniform::Camera {
+            view: look_at(
+                &position,
+                &Vec3::new(0.0, -0.3, 0.0),
+                &Vec3::new(0.0, 1.0, 0.0),
+            ),
+            position,
+            ..camera
+        };
+        assert_ne!(
+            moved,
+            render_shadow_scene(&mut renderer, &objects, moved_camera, &moved_light)
+        );
+        assert_eq!(image, renderer.shadow.as_ref().unwrap().image(0));
+        let draws = [TextDraw {
+            text: "Shadow",
+            position: Vec2::new(2.0, 2.0),
+            scale: 1.0,
+            color: Vec4::new(1.0, 1.0, 1.0, 1.0),
+        }];
+        let text = renderer
+            .render_frame_with_text(&objects, camera, &moved_light, &[], &draws)
+            .unwrap();
+        assert_ne!(moved, text);
+        assert_eq!(renderer.shadow_draw_calls, 2);
+        assert_eq!(renderer.validation_error_count(), 0);
+    }
 
     const COLOR_ATTACHMENT: vk::FormatFeatureFlags = vk::FormatFeatureFlags::COLOR_ATTACHMENT;
 

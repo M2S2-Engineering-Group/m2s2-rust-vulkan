@@ -146,6 +146,23 @@ are nicer, but not enough to justify redoing `instance.rs`/`device.rs`/`swapchai
 - **`depth.rs`, `uniform.rs`, `allocator.rs`** — shared synchronized depth attachment, per-frame mapped
   uniforms/descriptors, and GPU suballocation. Private `cleanup.rs` provides constructor rollback helpers.
 
+### Shader recompilation
+
+`shaders/*.spv` are precompiled SPIR-V committed to the repo (see specs/001 "Decision: precompiled
+SPIR-V"); edit the `.vert`/`.frag` source and recompile with `glslc`, not by hand-editing the `.spv`.
+Spec 017 (directional shadow mapping) made `triangle.vert`/`triangle.frag` macro-conditional on
+`SHADOWS_ENABLED`, so each must be compiled **twice** — once with the macro undefined (the existing
+disabled-shadow artifacts) and once with `-DSHADOWS_ENABLED` (the shadow-enabled variant) — plus the
+standalone depth-only shadow-pass vertex shader, which has no macro variant and no fragment shader:
+
+```bash
+glslc shaders/shadow_depth.vert -o shaders/shadow_depth.vert.spv
+glslc shaders/triangle.vert -o shaders/triangle.vert.spv
+glslc shaders/triangle.frag -o shaders/triangle.frag.spv
+glslc -DSHADOWS_ENABLED shaders/triangle.vert -o shaders/triangle_shadow.vert.spv
+glslc -DSHADOWS_ENABLED shaders/triangle.frag -o shaders/triangle_shadow.frag.spv
+```
+
 **Window handles, not window ownership**: the renderer takes handles (`RawDisplayHandle` +
 `RawWindowHandle`, from `raw-window-handle`, a direct dependency) plus an explicit `(u32, u32)` surface
 extent — not a `Window` type. `winit` is a dev-dependency only, used by the examples to obtain those

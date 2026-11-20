@@ -86,7 +86,7 @@ headless/golden tests, [015](specs/015-multiple-mesh-resources.md) multiple mesh
 [016](specs/016-gpu-instancing.md) GPU instancing, and [014](specs/014-texture-mipmaps.md) texture
 mipmaps.
 
-Remaining drafts: [017](specs/017-directional-shadow-mapping.md) directional shadows. Numbering
+Completed next: [017](specs/017-directional-shadow-mapping.md) directional shadows. Numbering
 identifies documents, not a mandatory execution sequence.
 
 ## Phase 3: Scene & asset infrastructure
@@ -115,7 +115,7 @@ This is the phase the Phase 1 decisions (dynamic rendering, per-pass-splittable 
 
 - [ ] **Render graph / multi-pass architecture**: ordered passes with attachment dependencies, built on
       dynamic rendering from Phase 1
-- [ ] **Shadow mapping**: depth-only pass + sampling
+- [x] **Shadow mapping**: depth-only pass + hard directional-shadow sampling — [spec 017](specs/017-directional-shadow-mapping.md).
 - [ ] **Deferred shading**: G-buffer pass + lighting pass
 - [ ] **Post-processing**: tone mapping, bloom, screen-space effects as additional passes in the render graph
 - [ ] **PBR materials**: metallic/roughness workflow, image-based lighting

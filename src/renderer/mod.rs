@@ -11,6 +11,8 @@ mod handle;
 #[cfg(test)]
 pub(crate) mod headless;
 mod image;
+#[cfg(test)]
+mod image_readback;
 pub mod instance;
 pub(crate) mod instance_buffer;
 pub mod light;
@@ -21,6 +23,7 @@ pub(crate) mod mip_readback;
 pub(crate) mod per_frame_uniform;
 pub mod pipeline;
 pub mod scene;
+pub mod shadow;
 pub(crate) mod submission;
 pub mod swapchain;
 pub mod text;
@@ -108,6 +111,24 @@ pub struct VulkanRenderer {
     // frame in `draw_frame` and bound once before the per-object draw loop. Like `light`/`uniforms`,
     // freed via explicit `destroy` in `Drop` before the allocator.
     pub(crate) instance_buffer: Option<InstanceBuffer>,
+    // Directional shadow pass state (spec 017). `shadow`/`shadow_pipeline` are the live per-frame
+    // GPU resources and depth-only pipeline -- both `None` when no shadow is configured. Freed via
+    // explicit `destroy`/`drop` in `Drop` (the former needs `&mut Allocator`), before the
+    // allocator, and before `pipeline` is torn down (its layout may reference `shadow`'s
+    // descriptor-set layout -- see `Drop`'s ordering comment). `pending_shadow_config` is
+    // `set_directional_shadow`'s deferred reallocation request -- `None` = nothing pending,
+    // `Some(None)` = disable on the next frame, `Some(Some(resolution))` = (re)allocate at
+    // `resolution` -- applied at the top of `render_objects_with_text`, same as `pending_resize`.
+    // `shadow_resolution` tracks the resolution of the currently *live* `shadow` (`None` when
+    // disabled), independent of `ShadowResources` (which doesn't expose it), so
+    // `set_directional_shadow` can compare against it. `current_shadow_values` is the
+    // (light_view_proj, constant_bias, slope_bias) uploaded every frame while shadows are enabled;
+    // cleared on disable since a disabled pass never reads it.
+    pub(crate) shadow: Option<shadow::ShadowResources>,
+    pub(crate) shadow_pipeline: Option<pipeline::GraphicsPipeline>,
+    pending_shadow_config: Option<Option<u32>>,
+    shadow_resolution: Option<u32>,
+    pub(crate) current_shadow_values: Option<(Mat4, f32, f32)>,
     // Terminal when a fence wait could not confirm GPU completion: the renderer then leaks its whole
     // resource graph in `Drop` and every public operation returns `VulkanError::Terminal`.
     submit_state: SubmitState,
@@ -305,6 +326,11 @@ impl VulkanRenderer {
             directional_light: DirectionalLight::default(),
             point_lights: Vec::new(),
             instance_buffer: Some(instance_buffer),
+            shadow: None,
+            shadow_pipeline: None,
+            pending_shadow_config: None,
+            shadow_resolution: None,
+            current_shadow_values: None,
             submit_state: SubmitState::NotSubmitted,
             allocator: ManuallyDrop::new(allocator),
             _window: window,
@@ -342,6 +368,69 @@ impl VulkanRenderer {
         validate_point_lights(lights)?;
         self.point_lights = lights.to_vec();
         Ok(())
+    }
+
+    /// Configure (or, with `None`, disable) the directional shadow pass used for subsequent
+    /// frames. Validates `shadow` (`shadow::validate_directional_shadow`) before touching any
+    /// state -- on validation failure the renderer is unchanged, same "reject without touching
+    /// prior state" contract `set_directional_light`/`set_point_lights` honor.
+    ///
+    /// The GPU-resource reallocation this can require (a new shadow depth image/descriptor set
+    /// per frame-in-flight, the depth-only shadow pipeline, and the main pipeline's
+    /// shadow-enabled/disabled variant swap) is deferred: only the *resolution* decides whether
+    /// reallocation is needed (`shadow_reallocation_needed`), and the actual rebuild happens at
+    /// the top of the next `render_objects_with_text` call, following the same "keep prior
+    /// resources valid until every fallible step succeeds" shape `pending_resize` already uses.
+    /// The light-view-projection matrix and biases, by contrast, are cheap per-frame uploads --
+    /// `current_shadow_values` always reflects the latest call, independent of whether
+    /// reallocation is pending.
+    pub fn set_directional_shadow(
+        &mut self,
+        shadow: Option<shadow::DirectionalShadow>,
+    ) -> Result<()> {
+        let requested_resolution = match &shadow {
+            None => None,
+            Some(config) => {
+                shadow::validate_device_shadow(config, &self.instance, &self.device)?;
+                Some(config.resolution)
+            }
+        };
+        let current_resolution = self.pending_shadow_config.unwrap_or(self.shadow_resolution);
+        if shadow_reallocation_needed(current_resolution, requested_resolution) {
+            self.pending_shadow_config = Some(requested_resolution);
+        }
+        self.current_shadow_values = shadow.map(|config| {
+            (
+                config.light_view_proj,
+                config.constant_bias,
+                config.slope_bias,
+            )
+        });
+        Ok(())
+    }
+
+    /// Build the main scene pipeline matching `shadow`: the shadow-enabled 4-set variant
+    /// (`pipeline::GraphicsPipeline::new_with_shadow`) when `Some`, the plain 3-set variant
+    /// (`pipeline::GraphicsPipeline::new`) when `None`. Shared by every call site that
+    /// (re)builds the main pipeline -- the apply-pending-shadow-config path (Section
+    /// `render_objects_with_text`) and the format-change rebuild it falls through to -- so the
+    /// variant-selection logic lives in exactly one place.
+    fn build_main_pipeline(
+        &self,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+        shadow: Option<&shadow::ShadowResources>,
+    ) -> Result<pipeline::GraphicsPipeline> {
+        shadow::scene_pipeline(
+            &self.device,
+            (color_format, depth_format),
+            [
+                self.uniforms.as_ref().unwrap().descriptor_set_layout(),
+                self.texture_set_layout,
+                self.light.as_ref().unwrap().descriptor_set_layout(),
+            ],
+            shadow,
+        )
     }
 
     /// Reject any operation once the renderer has entered its terminal (poisoned) state — a fence wait
@@ -447,25 +536,67 @@ impl VulkanRenderer {
                     self.depth.as_ref().unwrap().format(),
                 )?;
             }
-            if self.pipeline_formats
-                != (self.swapchain.format, self.depth.as_ref().unwrap().format())
-            {
-                let pipeline = pipeline::GraphicsPipeline::new(
-                    &self.device,
-                    self.swapchain.format,
-                    self.depth.as_ref().unwrap().format(),
-                    &[
-                        self.uniforms.as_ref().unwrap().descriptor_set_layout(),
-                        self.texture_set_layout,
-                        self.light.as_ref().unwrap().descriptor_set_layout(),
-                    ],
-                )?;
-                let old = std::mem::replace(&mut self.pipeline, ManuallyDrop::new(pipeline));
-                drop(ManuallyDrop::into_inner(old));
-                self.pipeline_formats =
-                    (self.swapchain.format, self.depth.as_ref().unwrap().format());
-            }
             self.pending_resize = None;
+        }
+
+        // Apply a deferred `set_directional_shadow` reallocation (same ordering/rollback contract
+        // as `pending_resize` above: build every replacement resource into local variables first,
+        // and only swap them into `self` -- destroying the prior ones -- once every fallible step
+        // has succeeded, so a failure here leaves the renderer's prior shadow state untouched and
+        // `pending_shadow_config` set for a retry on the next frame).
+        if let Some(requested_resolution) = self.pending_shadow_config {
+            // The old pipeline/shadow resources below may still be referenced by a command buffer
+            // the GPU has not finished executing (only the NEXT `draw_frame` call waits on that
+            // frame slot's fence) -- wait for the device to go idle before destroying anything, the
+            // same rule `pending_resize` above already follows for `depth`/`pipeline`.
+            self.wait_idle()?;
+            let color_format = self.swapchain.format;
+            let depth_format = self.depth.as_ref().unwrap().format();
+            let replacement = shadow::ShadowReplacement::new(
+                &self.device,
+                &self.instance,
+                &mut self.allocator,
+                requested_resolution,
+                (color_format, depth_format),
+                [
+                    self.uniforms.as_ref().unwrap().descriptor_set_layout(),
+                    self.texture_set_layout,
+                    self.light.as_ref().unwrap().descriptor_set_layout(),
+                ],
+            )?;
+            // Retire pipelines before the descriptor layout they referenced.
+            drop(ManuallyDrop::into_inner(std::mem::replace(
+                &mut self.pipeline,
+                ManuallyDrop::new(replacement.scene_pipeline),
+            )));
+            drop(std::mem::replace(
+                &mut self.shadow_pipeline,
+                replacement.depth_pipeline,
+            ));
+            if let Some(old) = self.shadow.take() {
+                old.destroy(&self.device, &mut self.allocator);
+            }
+            self.shadow = replacement.resources;
+            self.shadow_resolution = requested_resolution;
+            self.pipeline_formats = (color_format, depth_format);
+            self.pending_shadow_config = None;
+        }
+
+        // A resize can change the swapchain/depth formats without a shadow-config change pending
+        // (and vice versa -- handled above); either trigger means the main pipeline, which
+        // declares its attachment formats at creation time (dynamic rendering, not a classic
+        // render pass), must be rebuilt to match. Both blocks above already rebuild and update
+        // `pipeline_formats` when they touch the pipeline, so this is a no-op whenever they did.
+        let current_formats = (self.swapchain.format, self.depth.as_ref().unwrap().format());
+        if self.pipeline_formats != current_formats {
+            let pipeline = self.build_main_pipeline(
+                current_formats.0,
+                current_formats.1,
+                self.shadow.as_ref(),
+            )?;
+            let old = std::mem::replace(&mut self.pipeline, ManuallyDrop::new(pipeline));
+            drop(ManuallyDrop::into_inner(old));
+            self.pipeline_formats = current_formats;
         }
 
         text::layout_text(text, self.swapchain.extent, &mut self.text_vertices)?;
@@ -494,6 +625,17 @@ impl VulkanRenderer {
             &self.meshes,
             &self.texture_sets,
             self.white_set,
+            self.shadow.as_mut(),
+            self.shadow_pipeline.as_ref(),
+            self.current_shadow_values
+                .map(
+                    |(light_view_proj, constant_bias, slope_bias)| shadow::DirectionalShadow {
+                        light_view_proj,
+                        resolution: self.shadow_resolution.unwrap(),
+                        constant_bias,
+                        slope_bias,
+                    },
+                ),
             self.text_renderer.as_mut(),
             &self.text_vertices,
         );
@@ -657,6 +799,8 @@ impl Drop for VulkanRenderer {
             std::mem::forget(self.light.take());
             std::mem::forget(self.instance_buffer.take());
             std::mem::forget(self.depth.take());
+            std::mem::forget(self.shadow.take());
+            std::mem::forget(self.shadow_pipeline.take());
             std::mem::forget(self.white_texture.take());
             std::mem::forget(self.text_renderer.take());
             std::mem::forget(std::mem::take(&mut self.textures));
@@ -682,8 +826,15 @@ impl Drop for VulkanRenderer {
                 text.destroy(&self.device, &mut self.allocator);
             }
             // Pipeline before uniforms: its pipeline layout references the descriptor-set layout
-            // that `uniforms` owns and destroys.
+            // that `uniforms` owns and destroys (and, when the shadow-enabled variant is active,
+            // `shadow`'s layout too -- so `shadow_pipeline`/`pipeline` must both go before
+            // `shadow` is destroyed below).
             ManuallyDrop::drop(&mut self.pipeline);
+            // `shadow_pipeline` is a plain `Option` (not `ManuallyDrop`): its `Drop` impl destroys
+            // the Vulkan pipeline/layout via its own cloned device handle, needing no allocator,
+            // so a normal drop suffices here -- it just must happen before `shadow`'s descriptor
+            // set layout is destroyed a few lines down.
+            drop(self.shadow_pipeline.take());
             // Free everything allocator-backed (uniforms' buffers, depth image, mesh/texture
             // buffers) before dropping the allocator -- every allocation must outlive neither the
             // allocator nor the device it was built from. Each owner is moved out of its `Option`
@@ -699,6 +850,9 @@ impl Drop for VulkanRenderer {
             }
             if let Some(depth) = self.depth.take() {
                 depth.destroy(&self.device, &mut self.allocator);
+            }
+            if let Some(shadow) = self.shadow.take() {
+                shadow.destroy(&self.device, &mut self.allocator);
             }
             for mesh in std::mem::take(&mut self.meshes) {
                 mesh.destroy(&self.device, &mut self.allocator);
@@ -735,6 +889,18 @@ fn validate_object_count(len: usize) -> Result<()> {
     Ok(())
 }
 
+/// Pure decision of whether `set_directional_shadow` needs to defer a GPU reallocation: `true`
+/// iff `current_resolution` and `requested_resolution` differ -- first enabling (`None` ->
+/// `Some`), disabling (`Some` -> `None`), or an actual resolution change (`Some(a)` -> `Some(b)`,
+/// `a != b`) all need one; requesting the same resolution (including staying disabled) is a
+/// no-op. See `set_directional_shadow`'s deferred-apply flow in `render_objects_with_text`.
+fn shadow_reallocation_needed(
+    current_resolution: Option<u32>,
+    requested_resolution: Option<u32>,
+) -> bool {
+    current_resolution != requested_resolution
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,5 +917,14 @@ mod tests {
             validate_object_count(MAX_INSTANCES_PER_FRAME + 1),
             Err(VulkanError::ValidationError(_))
         ));
+    }
+
+    #[test]
+    fn shadow_reallocation_needed_on_first_enable_and_resolution_change_only() {
+        assert!(shadow_reallocation_needed(None, Some(1024))); // first enable
+        assert!(shadow_reallocation_needed(Some(1024), Some(2048))); // resolution changed
+        assert!(shadow_reallocation_needed(Some(1024), None)); // disabling
+        assert!(!shadow_reallocation_needed(Some(1024), Some(1024))); // same resolution: no-op
+        assert!(!shadow_reallocation_needed(None, None)); // staying disabled: no-op
     }
 }

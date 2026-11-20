@@ -6,6 +6,16 @@ layout(set = 0, binding = 0, row_major) uniform CameraUniforms {
     mat4 proj;
 } camera;
 
+#ifdef SHADOWS_ENABLED
+// Shadow set (set 3 in the main pipeline's own numbering): binding 0 is the depth-comparison
+// sampler (fragment-only, declared in triangle.frag); binding 1 is the light's view-projection
+// matrix, needed here to compute each vertex's light-space position for the fragment shader to
+// sample against the shadow map.
+layout(set = 3, binding = 1, row_major) uniform LightViewProj {
+    mat4 lightViewProj;
+} light;
+#endif
+
 // Vertex attributes, fed from a vertex buffer (see src/renderer/buffer.rs Vertex).
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inColor;
@@ -28,6 +38,9 @@ layout(location = 1) out vec2 fragUV;
 layout(location = 2) out vec3 fragNormal;
 layout(location = 3) out vec3 fragWorldPos;
 layout(location = 4) flat out vec4 fragSpecular;
+#ifdef SHADOWS_ENABLED
+layout(location = 5) out vec4 fragLightSpacePos;
+#endif
 
 void main() {
     // GLSL's mat4(c0, c1, c2, c3) constructor treats its vec4 arguments as COLUMNS. inModelRow0..3
@@ -49,4 +62,7 @@ void main() {
     // the fragment shader.
     fragNormal = normalMatrix * inNormal;
     fragSpecular = inSpecular;
+#ifdef SHADOWS_ENABLED
+    fragLightSpacePos = light.lightViewProj * worldPos;
+#endif
 }

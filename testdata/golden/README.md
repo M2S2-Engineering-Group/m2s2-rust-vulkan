@@ -26,3 +26,17 @@ VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT car
 
 The multi-mesh rejection test has no golden file; it checks invalid handles/uploads and successful
 rendering afterward. Never regenerate existing baselines to hide a rendering regression.
+
+Spec 017 adds `shadow_disabled.png` and `shadow_cube_on_plane.png`: the same textured cube and
+separate receiver plane with shadows disabled/enabled. Generated and inspected on Apple M5 /
+MoltenVK 1.4.1 using D32_SFLOAT, 256-square shadow maps, bias 1.25/1.75, and 96-square output;
+comparison tolerance is 2 per channel. The depth map itself is independently tested by GPU readback.
+
+Regenerate only these two references deliberately:
+
+```sh
+M2S2_UPDATE_GOLDEN=1 cargo test --lib renderer::headless::tests::shadow_cube_on_plane_matches_goldens -- --ignored --test-threads=1
+```
+
+Then rerun the full ignored suite without the update flag using the synchronization-validation
+command above. Settings and remaining interactive verification limits are recorded in spec 017.
