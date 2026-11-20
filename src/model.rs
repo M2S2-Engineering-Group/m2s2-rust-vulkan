@@ -953,4 +953,63 @@ mod tests {
         // verts), never increase it.
         assert!(total_vertices > 0 && total_vertices <= 3785);
     }
+
+    #[test]
+    fn explicit_matrix_field_places_translation_in_the_right_column_not_a_coincidence() {
+        // Regression test for a real bug found by manual visual inspection: the (throwaway,
+        // uncommitted) Mecha-Ziu converter script wrote translation into glTF's row 3 instead of
+        // column 3, which only ever corrupts a transformed vertex's W component (proportional to
+        // the vertex's own local position — different per vertex in the same mesh), producing
+        // huge sliver triangles after the perspective divide. Every other test in this file
+        // exercises the TRS "translation" field, which the gltf crate converts to a matrix
+        // internally and never touches this loader's node_local_matrix/explicit-"matrix" path at
+        // all — this is the one test that actually pins that path down.
+        let (bin, accessors, buffer_views) = shared_triangle_geometry();
+        let bin_len = bin.len();
+
+        // glTF's own column-major flat layout for translation (7, -3, 11): identity rotation/
+        // scale, translation in the last 4 elements (indices 12..16).
+        let matrix = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 7.0, -3.0, 11.0, 1.0,
+        ];
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] } ],
+            "scene": 0,
+            "nodes": [ { "mesh": 0, "matrix": matrix } ],
+            "meshes": [ {
+                "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3 } ]
+            } ],
+            "accessors": accessors,
+            "bufferViews": buffer_views,
+            "buffers": [ { "byteLength": bin_len } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let model = super::load_gltf(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let w = model.meshes[0].world_transform;
+        // Translation must land in column 3 (rows 0-2), not row 3 — the exact slot the bug wrote
+        // it to instead.
+        assert_eq!(
+            (
+                w.get(0, 3).unwrap(),
+                w.get(1, 3).unwrap(),
+                w.get(2, 3).unwrap()
+            ),
+            (7.0, -3.0, 11.0)
+        );
+        assert_eq!(
+            (
+                w.get(3, 0).unwrap(),
+                w.get(3, 1).unwrap(),
+                w.get(3, 2).unwrap()
+            ),
+            (0.0, 0.0, 0.0)
+        );
+        assert_eq!(w.get(3, 3).unwrap(), 1.0);
+    }
 }

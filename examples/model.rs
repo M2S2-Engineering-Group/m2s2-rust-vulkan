@@ -19,10 +19,10 @@ const MAX_CAMERA_DELTA: Duration = Duration::from_millis(100);
 const MAX_PITCH: f32 = 1.553;
 
 // The mech's own world-space bounding box (computed once from the converted asset) places its
-// center near (1.3, 11.5, 2.2) and spans roughly 32x22x18 units — the initial camera sits back
+// center near (-0.4, 11.5, 3.8) and spans roughly 23x24x15 units — the initial camera sits back
 // along +Z from that center so the whole model is in view on launch.
-const LOOK_AT_TARGET: [f32; 3] = [1.3, 11.5, 2.2];
-const INITIAL_CAMERA_OFFSET: [f32; 3] = [0.0, 5.0, 55.0];
+const LOOK_AT_TARGET: [f32; 3] = [-0.4, 11.5, 3.8];
+const INITIAL_CAMERA_OFFSET: [f32; 3] = [0.0, 5.0, 45.0];
 
 struct CameraInput {
     held: HashSet<KeyCode>,
