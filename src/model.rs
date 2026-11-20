@@ -17,6 +17,7 @@ pub struct LoadedMesh {
     pub indices: Vec<Index>,
     pub world_transform: Mat4,
     pub texture: Option<usize>,
+    pub base_color_factor: Vec3,
 }
 
 pub struct LoadedImage {
@@ -168,23 +169,23 @@ fn load_mesh(mesh: &Mesh, world_transform: Mat4, ctx: &mut LoadContext) -> Resul
         })
         .collect::<Result<Vec<Index>>>()?;
 
-    let texture = match primitive
-        .material()
-        .pbr_metallic_roughness()
-        .base_color_texture()
-    {
+    let pbr = primitive.material().pbr_metallic_roughness();
+    let texture = match pbr.base_color_texture() {
         None => None,
         Some(info) => {
             let image = info.as_ref().source();
             Some(resolve_texture(&image, ctx)?)
         }
     };
+    let [r, g, b, _a] = pbr.base_color_factor();
+    let base_color_factor = Vec3::new(r, g, b);
 
     Ok(LoadedMesh {
         vertices,
         indices,
         world_transform,
         texture,
+        base_color_factor,
     })
 }
 
@@ -229,6 +230,7 @@ fn resolve_texture(image: &Image, ctx: &mut LoadContext) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
+    use crate::math::Vec3;
     use serde_json::{json, Value};
     use std::io::Write;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -522,6 +524,101 @@ mod tests {
         assert_eq!(model.meshes.len(), 1);
         assert_eq!(model.meshes[0].texture, None);
         assert!(model.textures.is_empty());
+    }
+
+    #[test]
+    fn explicit_base_color_factor_is_read() {
+        let (bin, accessors, buffer_views) = shared_triangle_geometry();
+        let bin_len = bin.len();
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] } ],
+            "scene": 0,
+            "nodes": [ { "mesh": 0 } ],
+            "meshes": [ {
+                "primitives": [ {
+                    "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 },
+                    "indices": 3,
+                    "material": 0
+                } ]
+            } ],
+            "materials": [ {
+                "pbrMetallicRoughness": { "baseColorFactor": [0.2, 0.4, 0.6, 1.0] }
+            } ],
+            "accessors": accessors,
+            "bufferViews": buffer_views,
+            "buffers": [ { "byteLength": bin_len } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let model = super::load_gltf(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(model.meshes[0].base_color_factor, Vec3::new(0.2, 0.4, 0.6));
+        assert_eq!(model.meshes[0].texture, None);
+    }
+
+    #[test]
+    fn omitted_base_color_factor_defaults_to_white() {
+        let (bin, accessors, buffer_views) = shared_triangle_geometry();
+        let bin_len = bin.len();
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] } ],
+            "scene": 0,
+            "nodes": [ { "mesh": 0 } ],
+            "meshes": [ {
+                "primitives": [ {
+                    "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 },
+                    "indices": 3,
+                    "material": 0
+                } ]
+            } ],
+            "materials": [ { "pbrMetallicRoughness": {} } ],
+            "accessors": accessors,
+            "bufferViews": buffer_views,
+            "buffers": [ { "byteLength": bin_len } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let model = super::load_gltf(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(model.meshes[0].base_color_factor, Vec3::new(1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn no_material_at_all_defaults_base_color_factor_to_white() {
+        let (bin, accessors, buffer_views) = shared_triangle_geometry();
+        let bin_len = bin.len();
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] } ],
+            "scene": 0,
+            "nodes": [ { "mesh": 0 } ],
+            "meshes": [ {
+                "primitives": [ {
+                    "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 },
+                    "indices": 3
+                } ]
+            } ],
+            "accessors": accessors,
+            "bufferViews": buffer_views,
+            "buffers": [ { "byteLength": bin_len } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let model = super::load_gltf(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(model.meshes[0].base_color_factor, Vec3::new(1.0, 1.0, 1.0));
+        assert_eq!(model.meshes[0].texture, None);
     }
 
     #[test]
