@@ -21,6 +21,10 @@ env_logger = "0.10"
 anyhow = "1.0"
 # GPU memory allocator (vulkan backend only — skip the default d3d12/metal backends)
 gpu-allocator = { version = "0.28", default-features = false, features = ["vulkan", "std"] }
+# glTF model loading (spec 020). default-features off: the crate's "import" feature
+# unconditionally pulls in the `image` crate for decoding, which this library deliberately
+# keeps out of src/ — texture bytes are decoded by the caller instead.
+gltf = { version = "1.4", default-features = false, features = ["utils", "names"] }
 
 [dev-dependencies]
 # For examples and tests
@@ -28,6 +32,8 @@ pollster = "0.3"
 winit = "0.29"
 # PNG encoding/decoding for golden-image tests
 png = "0.17"
+# Builds synthetic .glb JSON fixtures for src/model.rs's unit tests
+serde_json = "1"
 
 [[example]]
 name = "triangle"
@@ -36,3 +42,7 @@ path = "examples/triangle.rs"
 [[example]]
 name = "window"
 path = "examples/window.rs"
+
+[[example]]
+name = "model"
+path = "examples/model.rs"

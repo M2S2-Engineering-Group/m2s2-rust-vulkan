@@ -1,5 +1,6 @@
 pub mod error;
 pub mod math;
+pub mod model;
 mod renderer;
 
 pub use error::{Result, VulkanError};
