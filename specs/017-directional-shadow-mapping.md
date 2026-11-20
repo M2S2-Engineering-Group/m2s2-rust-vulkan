@@ -1,6 +1,6 @@
 # 017: Directional shadow mapping
 
-**Status**: Draft for review; pass-recording interfaces are provisional. Not implemented.
+**Status**: Implemented; CPU and GPU acceptance verified on Apple M5 / MoltenVK (2026-11-20).
 **Roadmap item**: Phase 4 shadow mapping, pulled forward as a bounded first multi-pass example.
 **Dependencies**: 012 ownership/error handling; 011/013 directional shading; 015 mesh resources.
 Use 016's instance batches if available. Do not build a second mesh/object resolver for the shadow pass.
@@ -256,3 +256,44 @@ Pending implementation. This is a two-pass contract, not approval to introduce a
 
 - [Vulkan synchronization examples](https://docs.vulkan.org/guide/latest/synchronization_examples.html)
 - [Sampler comparison and LOD configuration](https://docs.vulkan.org/refpages/latest/refpages/source/VkSamplerCreateInfo.html)
+
+## Outcome (2026-11-20)
+
+Implemented the two-pass windowed and headless paths. Both record the depth pass before the main
+scene in one primary command buffer and reuse `command::emit_object_draws`, including its actual
+texture identities and contiguous instance batches. The depth pipeline enables dynamic raster
+bias; the main pipeline restores its viewport/scissor and binds the selected frame's shadow set.
+Layout state is marked used after successful submission, with per-slot fence waits before mapped
+updates in the windowed path. Scene diagnostics exclude shadow draws.
+
+Shared `ShadowReplacement` builds the complete replacement before either renderer retires its old
+pipelines/resources. Configuration validation and scene-pipeline selection are also shared. The
+selected image format/usage/extent is checked against image-format properties before allocation.
+Test builds add TRANSFER_SRC usage for depth readback; production shadow images retain only depth
+attachment and sampled usage. Texture mip and shadow-depth inspection share the test-only sampled
+image readback protocol.
+
+Verified on Apple M5, MoltenVK 1.4.1 (driver 0.2.2209), Vulkan device API 1.4.334. Shadow acceptance
+uses D32_SFLOAT, 256-square maps, a caller-supplied perspective light camera with one Vulkan Y flip,
+constant/slope bias 1.25/1.75, and 96-square RGBA8 output. The new `shadow_disabled.png` and
+`shadow_cube_on_plane.png` references use per-channel tolerance 2. Both were generated on real
+hardware and visually inspected: the enabled image adds a hard shadow beneath the cube. Readback
+independently proves the map contains caster depth at its center and clear depth 1 at an empty
+corner. Hard edges and map-resolution aliasing remain expected; these settings are starting values,
+not universal bias tuning for arbitrary scenes.
+
+All 32 ignored GPU tests pass with synchronization validation enabled, including all previous
+mipmap, instancing, lighting, and multi-mesh goldens. All pre-existing golden PNGs remain unchanged.
+New coverage exercises repeated use, enable/disable restoring the exact baseline, resolution/bias
+changes, moving light/projection, moving camera, instanced textured casters, text, out-of-frustum
+receivers, unshadowed ambient/point lights, rejected configuration, and replacement failure retention.
+The failure test uses the real replacement backend with an unsupported extent; there is no allocator
+fault-injection backend. Allocation/pipeline failure rollback is additionally verified by inspection:
+new owners are cleaned up at each fallible boundary and live owners are replaced only after success.
+
+The cube example now includes a separate ground mesh and enables a stationary 1024-square shadow
+map with the same starting bias values. A windowed smoke run with two frames in flight and
+synchronization validation produced no validation messages. Automated window resize/minimize checks
+were unavailable because the UI automation tool could not attach to the standalone example binary;
+those interactive checks and broader bias tuning remain manual verification limits. Headless tests
+exercise completed-submission teardown, not simultaneous frames in flight.

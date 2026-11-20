@@ -21,6 +21,20 @@ every frame like the existing `directional_light` already does.
 (including its "Resolved decisions (2026-11-19)" section — read both; the plan argues from the whole
 file).
 
+## Handoff status (2026-11-20)
+
+- [x] Tasks 1–4: committed before handoff (through `162cbec`).
+- [x] Task 5: shared shadow-pass recording, per-slot updates and dependencies, main state restoration.
+- [x] Task 6: headless configuration, transactional replacement, recording and teardown.
+- [x] Task 7: rejection/ownership coverage; real unsupported-extent replacement failure tested.
+  No allocator fault-injection backend exists; allocation/pipeline rollback reviewed by inspection.
+- [x] Task 8: cube receiver/demo, depth readback, two new hardware-generated and inspected goldens,
+  all 32 ignored GPU tests passing with synchronization validation, old goldens unchanged.
+
+Continuation changes are left uncommitted for review. Step-level boxes below retain the original
+plan history rather than implying every suggested test name and commit was followed verbatim.
+See spec 017's Outcome for settings and verification limits, including manual resize/minimize.
+
 ## Global Constraints
 
 - `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`,

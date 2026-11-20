@@ -1,9 +1,9 @@
 use m2s2_rust_vulkan::math::{
-    look_at, perspective, rotate, to_radians, translate, Vec2, Vec3, Vec4,
+    look_at, perspective, rotate, to_radians, translate, Mat4, Vec2, Vec3, Vec4,
 };
 use m2s2_rust_vulkan::{
-    init_logging, Camera, Diagnostics, DirectionalLight, Index, Mipmaps, Object, PointLight,
-    SpecularMaterial, TextDraw, TextureOptions, Vertex, VulkanRenderer,
+    init_logging, Camera, Diagnostics, DirectionalLight, DirectionalShadow, Index, Mipmaps, Object,
+    PointLight, SpecularMaterial, TextDraw, TextureOptions, Vertex, VulkanRenderer,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -15,6 +15,10 @@ use winit::window::WindowBuilder;
 
 // Leaves clearance between the unit cubes throughout their rotations.
 const CUBE_CENTER_OFFSET: f32 = 1.0;
+const SHADOW_RESOLUTION: u32 = 1024;
+// Starting hard-shadow bias values; visual tuning depends on projection and depth precision.
+const SHADOW_CONSTANT_BIAS: f32 = 1.25;
+const SHADOW_SLOPE_BIAS: f32 = 1.75;
 // Point-light demo (spec 018): one static warm light, one cool light orbiting the scene so its
 // per-frame movement is visible. Both ranges are large enough to overlap and cover both cubes.
 const POINT_LIGHT_STATIC_RANGE: f32 = 4.0;
@@ -169,6 +173,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut renderer = VulkanRenderer::with_window(Arc::clone(&window), (size.width, size.height))?;
     let cube_mesh = renderer.create_mesh(&vertices, &indices)?;
+    let ground = face(
+        [0.0, 1.0, 0.0],
+        [
+            ([-4.0, -0.9, 4.0], WHITE),
+            ([4.0, -0.9, 4.0], WHITE),
+            ([4.0, -0.9, -4.0], WHITE),
+            ([-4.0, -0.9, -4.0], WHITE),
+        ],
+    );
+    let ground_mesh = renderer.create_mesh(&ground, &[0, 1, 2, 2, 3, 0])?;
 
     // Two 256x256 RGBA8 checker textures, 4x4-texel checks (spec 014): the left cube's texture
     // opts into mipmap generation, the right cube's doesn't. Moving the free-fly camera from near
@@ -227,6 +241,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         color: Vec3::new(0.35, 0.34, 0.32),
         ambient: Vec3::new(0.05, 0.05, 0.07),
     })?;
+
+    // Match the stationary sun's direction; perspective() supplies the single Vulkan Y flip.
+    let light_view = look_at(
+        &Vec3::new(4.0, 10.0, 6.0),
+        &Vec3::new(0.0, 0.0, 0.0),
+        &Vec3::new(0.0, 1.0, 0.0),
+    );
+    renderer.set_directional_shadow(Some(DirectionalShadow {
+        light_view_proj: perspective(to_radians(65.0), 1.0, 0.1, 30.0) * light_view,
+        resolution: SHADOW_RESOLUTION,
+        constant_bias: SHADOW_CONSTANT_BIAS,
+        slope_bias: SHADOW_SLOPE_BIAS,
+    }))?;
 
     // The "simulation" side: a start time the cube's model matrix spins off of. This is what a game
     // engine's update step would own; the renderer only receives the resulting matrices (spec 006).
@@ -378,6 +405,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         model: models[1],
                         texture: Some(tex_b),
                         specular: specular[1],
+                    },
+                    Object {
+                        mesh: ground_mesh,
+                        model: Mat4::IDENTITY,
+                        texture: None,
+                        specular: SpecularMaterial::default(),
                     },
                 ];
                 // Free-fly camera: arrow keys rotate (yaw/pitch), WASD move relative to the facing.

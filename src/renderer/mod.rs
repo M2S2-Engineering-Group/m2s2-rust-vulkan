@@ -11,6 +11,8 @@ mod handle;
 #[cfg(test)]
 pub(crate) mod headless;
 mod image;
+#[cfg(test)]
+mod image_readback;
 pub mod instance;
 pub(crate) mod instance_buffer;
 pub mod light;
@@ -389,24 +391,7 @@ impl VulkanRenderer {
         let requested_resolution = match &shadow {
             None => None,
             Some(config) => {
-                shadow::validate_directional_shadow(config)?;
-                // The shadow depth image is config.resolution x config.resolution; reject before
-                // storing a pending reallocation that `vkCreateImage` would reject anyway (and
-                // would otherwise retry forever every frame, since a device-limit violation never
-                // becomes valid on retry, unlike a transient allocation failure).
-                let max_dimension = unsafe {
-                    self.instance
-                        .instance
-                        .get_physical_device_properties(self.device.physical_device)
-                }
-                .limits
-                .max_image_dimension2_d;
-                if config.resolution > max_dimension {
-                    return Err(VulkanError::ValidationError(format!(
-                        "directional shadow resolution {} exceeds device max_image_dimension2D {}",
-                        config.resolution, max_dimension
-                    )));
-                }
+                shadow::validate_device_shadow(config, &self.instance, &self.device)?;
                 Some(config.resolution)
             }
         };
@@ -436,29 +421,16 @@ impl VulkanRenderer {
         depth_format: vk::Format,
         shadow: Option<&shadow::ShadowResources>,
     ) -> Result<pipeline::GraphicsPipeline> {
-        match shadow {
-            Some(shadow) => pipeline::GraphicsPipeline::new_with_shadow(
-                &self.device,
-                color_format,
-                depth_format,
-                &[
-                    self.uniforms.as_ref().unwrap().descriptor_set_layout(),
-                    self.texture_set_layout,
-                    self.light.as_ref().unwrap().descriptor_set_layout(),
-                    shadow.descriptor_set_layout(),
-                ],
-            ),
-            None => pipeline::GraphicsPipeline::new(
-                &self.device,
-                color_format,
-                depth_format,
-                &[
-                    self.uniforms.as_ref().unwrap().descriptor_set_layout(),
-                    self.texture_set_layout,
-                    self.light.as_ref().unwrap().descriptor_set_layout(),
-                ],
-            ),
-        }
+        shadow::scene_pipeline(
+            &self.device,
+            (color_format, depth_format),
+            [
+                self.uniforms.as_ref().unwrap().descriptor_set_layout(),
+                self.texture_set_layout,
+                self.light.as_ref().unwrap().descriptor_set_layout(),
+            ],
+            shadow,
+        )
     }
 
     /// Reject any operation once the renderer has entered its terminal (poisoned) state — a fence wait
@@ -580,70 +552,33 @@ impl VulkanRenderer {
             self.wait_idle()?;
             let color_format = self.swapchain.format;
             let depth_format = self.depth.as_ref().unwrap().format();
-            match requested_resolution {
-                Some(resolution) => {
-                    let new_shadow = shadow::ShadowResources::new(
-                        &self.device,
-                        &self.instance,
-                        &mut self.allocator,
-                        resolution,
-                    )?;
-                    let new_shadow_pipeline = match pipeline::GraphicsPipeline::new_shadow_depth(
-                        &self.device,
-                        new_shadow.format(),
-                        &[new_shadow.descriptor_set_layout()],
-                    ) {
-                        Ok(pipeline) => pipeline,
-                        Err(error) => {
-                            new_shadow.destroy(&self.device, &mut self.allocator);
-                            return Err(error);
-                        }
-                    };
-                    let new_main_pipeline = match self.build_main_pipeline(
-                        color_format,
-                        depth_format,
-                        Some(&new_shadow),
-                    ) {
-                        Ok(pipeline) => pipeline,
-                        Err(error) => {
-                            drop(new_shadow_pipeline);
-                            new_shadow.destroy(&self.device, &mut self.allocator);
-                            return Err(error);
-                        }
-                    };
-                    // Destroy order: the old main pipeline (and old shadow pipeline) before the
-                    // old `shadow`'s descriptor-set layout -- mirrors the `Drop` impl's "pipeline
-                    // before the layout its pipeline layout references" rule below. The old main
-                    // pipeline's layout may reference the OLD `shadow`'s descriptor-set layout
-                    // (if it was the shadow-enabled variant), so it must go first.
-                    let old_main_pipeline =
-                        std::mem::replace(&mut self.pipeline, ManuallyDrop::new(new_main_pipeline));
-                    drop(ManuallyDrop::into_inner(old_main_pipeline));
-                    drop(self.shadow_pipeline.replace(new_shadow_pipeline));
-                    if let Some(old_shadow) = self.shadow.take() {
-                        old_shadow.destroy(&self.device, &mut self.allocator);
-                    }
-                    self.shadow = Some(new_shadow);
-                    self.shadow_resolution = Some(resolution);
-                    self.pipeline_formats = (color_format, depth_format);
-                }
-                None => {
-                    let new_main_pipeline =
-                        self.build_main_pipeline(color_format, depth_format, None)?;
-                    // Same destroy-order reasoning as above: drop the old main pipeline (shadow-
-                    // enabled, referencing the old `shadow`'s layout) and the old shadow pipeline
-                    // before destroying `shadow` itself.
-                    let old_main_pipeline =
-                        std::mem::replace(&mut self.pipeline, ManuallyDrop::new(new_main_pipeline));
-                    drop(ManuallyDrop::into_inner(old_main_pipeline));
-                    drop(self.shadow_pipeline.take());
-                    if let Some(old_shadow) = self.shadow.take() {
-                        old_shadow.destroy(&self.device, &mut self.allocator);
-                    }
-                    self.shadow_resolution = None;
-                    self.pipeline_formats = (color_format, depth_format);
-                }
+            let replacement = shadow::ShadowReplacement::new(
+                &self.device,
+                &self.instance,
+                &mut self.allocator,
+                requested_resolution,
+                (color_format, depth_format),
+                [
+                    self.uniforms.as_ref().unwrap().descriptor_set_layout(),
+                    self.texture_set_layout,
+                    self.light.as_ref().unwrap().descriptor_set_layout(),
+                ],
+            )?;
+            // Retire pipelines before the descriptor layout they referenced.
+            drop(ManuallyDrop::into_inner(std::mem::replace(
+                &mut self.pipeline,
+                ManuallyDrop::new(replacement.scene_pipeline),
+            )));
+            drop(std::mem::replace(
+                &mut self.shadow_pipeline,
+                replacement.depth_pipeline,
+            ));
+            if let Some(old) = self.shadow.take() {
+                old.destroy(&self.device, &mut self.allocator);
             }
+            self.shadow = replacement.resources;
+            self.shadow_resolution = requested_resolution;
+            self.pipeline_formats = (color_format, depth_format);
             self.pending_shadow_config = None;
         }
 
@@ -690,6 +625,17 @@ impl VulkanRenderer {
             &self.meshes,
             &self.texture_sets,
             self.white_set,
+            self.shadow.as_mut(),
+            self.shadow_pipeline.as_ref(),
+            self.current_shadow_values
+                .map(
+                    |(light_view_proj, constant_bias, slope_bias)| shadow::DirectionalShadow {
+                        light_view_proj,
+                        resolution: self.shadow_resolution.unwrap(),
+                        constant_bias,
+                        slope_bias,
+                    },
+                ),
             self.text_renderer.as_mut(),
             &self.text_vertices,
         );

@@ -1,10 +1,8 @@
 //! Caller-facing directional shadow configuration and the renderer-owned per-frame GPU resources
 //! that back it: descriptor set 3 (binding 0 combined depth-comparison sampler, FRAGMENT; binding 1
 //! light-view-projection UBO, VERTEX | FRAGMENT). See specs/017-directional-shadow-mapping.md,
-//! "Resolved decisions". Not yet wired into `VulkanRenderer` or any pipeline (Task 4) -- this module
-//! only defines the config type, its validation, and `ShadowResources`' construction/destruction,
-//! following `depth.rs`'s format-selection pattern and `texture.rs`'s `StoredTexture::new` rollback
-//! shape. `#[allow(dead_code)]` throughout: Task 4 is this module's first production caller.
+//! "Resolved decisions". Both rendering paths share configuration validation and transactional
+//! pipeline/resource replacement here.
 
 use crate::error::{Result, VulkanError};
 use crate::math::Mat4;
@@ -38,7 +36,6 @@ pub struct DirectionalShadow {
 /// non-finite `constant_bias`/`slope_bias`. Bias may otherwise be any signed finite value. Pure, so
 /// it is unit-testable without a device -- mirrors `light.rs`'s `DirectionalLight::set_validated` and
 /// `texture.rs`'s `validate_specular`.
-#[allow(dead_code)] // Consumed by Task 4 (set_directional_shadow)
 pub(crate) fn validate_directional_shadow(shadow: &DirectionalShadow) -> Result<()> {
     if shadow.resolution == 0 {
         return Err(VulkanError::ValidationError(
@@ -121,6 +118,16 @@ impl ShadowSlot {
     }
 }
 
+fn shadow_image_usage() -> vk::ImageUsageFlags {
+    let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
+    // Only GPU tests copy the depth map to host memory.
+    if cfg!(test) {
+        usage | vk::ImageUsageFlags::TRANSFER_SRC
+    } else {
+        usage
+    }
+}
+
 /// Builds one `ShadowSlot`: depth image -> allocation -> bind -> view -> light-VP buffer ->
 /// descriptor-set allocation + write, rolling back every step already completed if a later one
 /// fails (mirrors `depth.rs:67-127`'s image/allocation/view rollback, extended with `texture.rs`'s
@@ -149,7 +156,7 @@ fn build_shadow_slot(
         .array_layers(1)
         .samples(vk::SampleCountFlags::TYPE_1)
         .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+        .usage(shadow_image_usage())
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .initial_layout(vk::ImageLayout::UNDEFINED);
     let image = unsafe {
@@ -286,7 +293,6 @@ fn build_shadow_slot(
 /// `[bool; FRAMES_IN_FLIGHT]` "has this slot ever been rendered into" tracker (spec 017's "First-use
 /// vs. reuse layout tracking"; all `false` at construction). Not `Drop`: freeing the allocations
 /// needs `&mut Allocator`, so call `destroy` explicitly.
-#[allow(dead_code)] // Consumed by Task 4 (VulkanRenderer wiring)
 pub(crate) struct ShadowResources {
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
@@ -305,7 +311,6 @@ impl ShadowResources {
     /// shape): a failure building slot N destroys slots `0..N` plus the shared pool/layout/sampler;
     /// a failure building the pool destroys the layout + sampler; a failure building the layout
     /// destroys the sampler.
-    #[allow(dead_code)] // Consumed by Task 4 (VulkanRenderer wiring)
     pub(crate) fn new(
         device: &VulkanDevice,
         instance: &VulkanInstance,
@@ -329,6 +334,30 @@ impl ShadowResources {
                     .into(),
             )
         })?;
+
+        let properties = unsafe {
+            instance
+                .instance
+                .get_physical_device_image_format_properties(
+                    device.physical_device,
+                    format,
+                    vk::ImageType::TYPE_2D,
+                    vk::ImageTiling::OPTIMAL,
+                    shadow_image_usage(),
+                    vk::ImageCreateFlags::empty(),
+                )
+        }
+        .map_err(VulkanError::from)?;
+        if resolution > properties.max_extent.width
+            || resolution > properties.max_extent.height
+            || !properties
+                .sample_counts
+                .contains(vk::SampleCountFlags::TYPE_1)
+        {
+            return Err(VulkanError::ValidationError(
+                "unsupported directional shadow image extent or sample count".into(),
+            ));
+        }
 
         let dev = &device.device;
 
@@ -443,27 +472,22 @@ impl ShadowResources {
         })
     }
 
-    #[allow(dead_code)] // Consumed by Task 4 (main scene pipeline's set-3 binding)
     pub(crate) fn descriptor_set_layout(&self) -> vk::DescriptorSetLayout {
         self.descriptor_set_layout
     }
 
-    #[allow(dead_code)] // Consumed by Task 4/5 (shadow + main pass recording)
     pub(crate) fn descriptor_set(&self, frame: usize) -> vk::DescriptorSet {
         self.slots[frame].descriptor_set
     }
 
-    #[allow(dead_code)] // Consumed by Task 5 (shadow-pass barriers)
     pub(crate) fn image(&self, frame: usize) -> vk::Image {
         self.slots[frame].image
     }
 
-    #[allow(dead_code)] // Consumed by Task 5 (shadow-pass dynamic rendering attachment)
     pub(crate) fn view(&self, frame: usize) -> vk::ImageView {
         self.slots[frame].view
     }
 
-    #[allow(dead_code)] // Consumed by Task 4 (depth-only shadow pipeline creation)
     pub(crate) fn format(&self) -> vk::Format {
         self.format
     }
@@ -471,7 +495,6 @@ impl ShadowResources {
     /// Write `light_view_proj` into frame `frame`'s mapped buffer. The caller must have waited on
     /// that frame's in-flight fence first (the render loop does), so the GPU isn't mid-read. Bias is
     /// NOT stored here -- it's dynamic state at record time (spec 017's "Configuration timing").
-    #[allow(dead_code)] // Consumed by Task 4 (per-frame light-VP upload)
     pub(crate) fn update(&mut self, frame: usize, light_view_proj: Mat4) -> Result<()> {
         self.slots[frame]
             .buffer
@@ -482,12 +505,10 @@ impl ShadowResources {
     /// recording -- Task 5's barrier logic reads this to decide whether the next shadow-pass use
     /// transitions from `UNDEFINED` (first use) or `DEPTH_STENCIL_READ_ONLY_OPTIMAL` (reuse after the
     /// main pass sampled it).
-    #[allow(dead_code)] // Consumed by Task 5 (shadow-pass barriers)
     pub(crate) fn mark_used(&mut self, frame: usize) {
         self.used[frame] = true;
     }
 
-    #[allow(dead_code)] // Consumed by Task 5 (shadow-pass barriers)
     pub(crate) fn was_used(&self, frame: usize) -> bool {
         self.used[frame]
     }
@@ -495,7 +516,6 @@ impl ShadowResources {
     /// Destroy every slot's image/view/allocation/buffer, then the shared descriptor pool (which
     /// implicitly frees its descriptor sets), descriptor set layout, and sampler. Must run before the
     /// `Allocator` is dropped.
-    #[allow(dead_code)] // Consumed by Task 4 (VulkanRenderer teardown)
     pub(crate) fn destroy(self, device: &VulkanDevice, allocator: &mut Allocator) {
         for slot in self.slots {
             slot.destroy(device, allocator);
@@ -510,6 +530,102 @@ impl ShadowResources {
             device.device.destroy_sampler(self.sampler, None);
         }
     }
+}
+
+/// Build a complete replacement before either renderer retires its live resources.
+/// On failure, every newly allocated resource is rolled back and the old owners are untouched.
+pub(super) struct ShadowReplacement {
+    pub resources: Option<ShadowResources>,
+    pub depth_pipeline: Option<super::pipeline::GraphicsPipeline>,
+    pub scene_pipeline: super::pipeline::GraphicsPipeline,
+}
+
+pub(super) fn scene_pipeline(
+    device: &VulkanDevice,
+    formats: (vk::Format, vk::Format),
+    layouts: [vk::DescriptorSetLayout; 3],
+    shadow: Option<&ShadowResources>,
+) -> Result<super::pipeline::GraphicsPipeline> {
+    use super::pipeline::GraphicsPipeline;
+    match shadow {
+        Some(shadow) => GraphicsPipeline::new_with_shadow(
+            device,
+            formats.0,
+            formats.1,
+            &[
+                layouts[0],
+                layouts[1],
+                layouts[2],
+                shadow.descriptor_set_layout(),
+            ],
+        ),
+        None => GraphicsPipeline::new(device, formats.0, formats.1, &layouts),
+    }
+}
+
+impl ShadowReplacement {
+    pub(super) fn new(
+        device: &VulkanDevice,
+        instance: &VulkanInstance,
+        allocator: &mut Allocator,
+        resolution: Option<u32>,
+        formats: (vk::Format, vk::Format),
+        layouts: [vk::DescriptorSetLayout; 3],
+    ) -> Result<Self> {
+        let Some(resolution) = resolution else {
+            return Ok(Self {
+                resources: None,
+                depth_pipeline: None,
+                scene_pipeline: scene_pipeline(device, formats, layouts, None)?,
+            });
+        };
+        let resources = ShadowResources::new(device, instance, allocator, resolution)?;
+        let depth_pipeline = match super::pipeline::GraphicsPipeline::new_shadow_depth(
+            device,
+            resources.format(),
+            &[resources.descriptor_set_layout()],
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                resources.destroy(device, allocator);
+                return Err(error);
+            }
+        };
+        match scene_pipeline(device, formats, layouts, Some(&resources)) {
+            Ok(scene_pipeline) => Ok(Self {
+                resources: Some(resources),
+                depth_pipeline: Some(depth_pipeline),
+                scene_pipeline,
+            }),
+            Err(error) => {
+                drop(depth_pipeline);
+                resources.destroy(device, allocator);
+                Err(error)
+            }
+        }
+    }
+}
+
+pub(super) fn validate_device_shadow(
+    config: &DirectionalShadow,
+    instance: &VulkanInstance,
+    device: &VulkanDevice,
+) -> Result<()> {
+    validate_directional_shadow(config)?;
+    let max_dimension = unsafe {
+        instance
+            .instance
+            .get_physical_device_properties(device.physical_device)
+    }
+    .limits
+    .max_image_dimension2_d;
+    if config.resolution > max_dimension {
+        return Err(VulkanError::ValidationError(format!(
+            "directional shadow resolution {} exceeds device max_image_dimension2D {}",
+            config.resolution, max_dimension
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

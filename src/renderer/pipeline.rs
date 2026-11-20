@@ -128,6 +128,7 @@ pub(super) struct PipelineDescription<'a> {
     pub bindings: &'a [vk::VertexInputBindingDescription],
     pub attributes: &'a [vk::VertexInputAttributeDescription],
     pub depth_test: bool,
+    pub depth_bias: bool,
     pub cull_mode: vk::CullModeFlags,
     pub blend: bool,
     pub push_ranges: &'a [vk::PushConstantRange],
@@ -136,6 +137,14 @@ pub(super) struct PipelineDescription<'a> {
 #[allow(dead_code)] // Consumed by Task 4 (depth-only pipeline)
 pub(super) fn shader_stage_count(fragment_shader: Option<&[u8]>) -> usize {
     1 + fragment_shader.is_some() as usize
+}
+
+fn pipeline_dynamic_states(depth_bias: bool) -> Vec<vk::DynamicState> {
+    let mut states = vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    if depth_bias {
+        states.push(vk::DynamicState::DEPTH_BIAS);
+    }
+    states
 }
 
 pub struct GraphicsPipeline {
@@ -172,6 +181,7 @@ impl GraphicsPipeline {
                 bindings: &bindings,
                 attributes: &attributes,
                 depth_test: true,
+                depth_bias: false,
                 cull_mode: vk::CullModeFlags::BACK,
                 blend: false,
                 push_ranges: &[],
@@ -202,6 +212,7 @@ impl GraphicsPipeline {
                 bindings: &bindings,
                 attributes: &attributes,
                 depth_test: true,
+                depth_bias: false,
                 cull_mode: vk::CullModeFlags::BACK,
                 blend: false,
                 push_ranges: &[],
@@ -231,6 +242,7 @@ impl GraphicsPipeline {
                 bindings: &bindings,
                 attributes: &attributes,
                 depth_test: true,
+                depth_bias: true,
                 cull_mode: vk::CullModeFlags::BACK,
                 blend: false,
                 push_ranges: &[],
@@ -302,11 +314,12 @@ impl GraphicsPipeline {
         let viewport_state = vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
             .scissor_count(1);
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_states = pipeline_dynamic_states(description.depth_bias);
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
         let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+            .depth_bias_enable(description.depth_bias)
             .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(description.cull_mode)
             // COUNTER_CLOCKWISE: the perspective Y-flip (see math::perspective) inverts screen-space
@@ -432,6 +445,23 @@ impl Drop for GraphicsPipeline {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dynamic_depth_bias_is_enabled_only_for_the_depth_pass() {
+        use super::*;
+        assert_eq!(
+            pipeline_dynamic_states(false),
+            vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]
+        );
+        assert_eq!(
+            pipeline_dynamic_states(true),
+            vec![
+                vk::DynamicState::VIEWPORT,
+                vk::DynamicState::SCISSOR,
+                vk::DynamicState::DEPTH_BIAS
+            ]
+        );
+    }
+
     use super::*;
 
     #[test]

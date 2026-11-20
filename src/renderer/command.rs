@@ -6,6 +6,7 @@
 use super::light::{DirectionalLight, Light, PointLight};
 use super::mesh::{self, StoredMesh};
 use super::scene::Object;
+use super::shadow::{DirectionalShadow, ShadowResources};
 use super::text::{TextRenderer, TextVertex};
 use super::texture::resolve_texture_set;
 use crate::error::{Result, VulkanError};
@@ -146,6 +147,9 @@ impl FrameContext {
         meshes: &[StoredMesh],
         texture_sets: &[vk::DescriptorSet],
         white_set: vk::DescriptorSet,
+        mut shadow: Option<&mut ShadowResources>,
+        shadow_pipeline: Option<&GraphicsPipeline>,
+        shadow_config: Option<DirectionalShadow>,
         mut text: Option<&mut TextRenderer>,
         text_vertices: &[TextVertex],
     ) -> Result<FrameOutcome> {
@@ -205,6 +209,9 @@ impl FrameContext {
         (|| -> Result<()> {
             uniforms.update(frame, camera)?;
             light.update(frame, directional_light, point_lights)?;
+            if let (Some(shadow), Some(config)) = (shadow.as_deref_mut(), shadow_config) {
+                shadow.update(frame, config.light_view_proj)?;
+            }
             // One InstanceData per object, in input order, so each run emitted by
             // emit_object_draws below can offset into this frame's buffer via firstInstance and
             // cover its own instanceCount of consecutive entries.
@@ -244,6 +251,9 @@ impl FrameContext {
             meshes,
             texture_sets,
             white_set,
+            shadow.as_deref_mut(),
+            shadow_pipeline,
+            shadow_config,
             text.as_deref(),
             frame,
             text_vertices.len() as u32,
@@ -268,6 +278,10 @@ impl FrameContext {
                 .map_err(|e| {
                     VulkanError::Terminal(format!("queue submit failed after fence reset: {e:?}"))
                 })?;
+        }
+
+        if let Some(shadow) = shadow {
+            shadow.mark_used(frame);
         }
 
         // 6. Present: wait on render_finished so the display engine doesn't show a half-drawn
@@ -321,6 +335,9 @@ impl FrameContext {
         meshes: &[StoredMesh],
         texture_sets: &[vk::DescriptorSet],
         white_set: vk::DescriptorSet,
+        mut shadow: Option<&mut ShadowResources>,
+        shadow_pipeline: Option<&GraphicsPipeline>,
+        shadow_config: Option<DirectionalShadow>,
         text: Option<&TextRenderer>,
         frame: usize,
         text_vertex_count: u32,
@@ -334,6 +351,25 @@ impl FrameContext {
                 .map_err(VulkanError::from)?;
             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default())
                 .map_err(VulkanError::from)?;
+
+            if let (Some(shadow), Some(pipeline), Some(config)) =
+                (shadow.as_deref_mut(), shadow_pipeline, shadow_config)
+            {
+                record_shadow_pass(
+                    dev,
+                    cmd,
+                    pipeline,
+                    shadow,
+                    frame,
+                    config,
+                    objects,
+                    owner,
+                    meshes,
+                    texture_sets,
+                    white_set,
+                    instance_buffer,
+                );
+            }
 
             // a. UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL before we render into the image.
             let to_color = vk::ImageMemoryBarrier::default()
@@ -434,6 +470,17 @@ impl FrameContext {
                 &[light_set],
                 &[],
             );
+
+            if let Some(shadow) = shadow {
+                dev.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline.pipeline_layout,
+                    3,
+                    &[shadow.descriptor_set(frame)],
+                    &[],
+                );
+            }
 
             // d. Viewport + scissor are dynamic (spec 001), so they must be set every recording.
             let viewport = vk::Viewport {
@@ -537,6 +584,169 @@ pub(super) enum ObjectCommand {
         instance_count: u32,
         first_instance: u32,
     },
+}
+
+/// Record the depth pass using the scene's validated draw plan, including texture identities
+/// for identical instance batching. The caller uploads this slot only after confirmed completion.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn record_shadow_pass(
+    dev: &ash::Device,
+    cmd: vk::CommandBuffer,
+    pipeline: &GraphicsPipeline,
+    shadow: &mut ShadowResources,
+    frame: usize,
+    config: DirectionalShadow,
+    objects: &[Object],
+    owner: u64,
+    meshes: &[StoredMesh],
+    texture_sets: &[vk::DescriptorSet],
+    white_set: vk::DescriptorSet,
+    instance_buffer: vk::Buffer,
+) -> usize {
+    let (src_stage, to_attachment) =
+        shadow_attachment_barrier(shadow.image(frame), shadow.was_used(frame));
+    let extent = vk::Extent2D {
+        width: config.resolution,
+        height: config.resolution,
+    };
+    let area = vk::Rect2D {
+        offset: vk::Offset2D::default(),
+        extent,
+    };
+    let mut draws = 0;
+    unsafe {
+        dev.cmd_pipeline_barrier(
+            cmd,
+            src_stage,
+            depth_stages(),
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[to_attachment],
+        );
+        let attachment = vk::RenderingAttachmentInfo::default()
+            .image_view(shadow.view(frame))
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .clear_value(vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            });
+        let rendering = vk::RenderingInfo::default()
+            .render_area(area)
+            .layer_count(1)
+            .depth_attachment(&attachment);
+        dev.cmd_begin_rendering(cmd, &rendering);
+        dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
+        dev.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::GRAPHICS,
+            pipeline.pipeline_layout,
+            0,
+            &[shadow.descriptor_set(frame)],
+            &[],
+        );
+        dev.cmd_set_viewport(
+            cmd,
+            0,
+            &[vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: extent.width as f32,
+                height: extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            }],
+        );
+        dev.cmd_set_scissor(cmd, 0, &[area]);
+        dev.cmd_set_depth_bias(cmd, config.constant_bias, 0.0, config.slope_bias);
+        emit_object_draws(
+            objects,
+            owner,
+            meshes,
+            texture_sets,
+            white_set,
+            instance_buffer,
+            |command| match command {
+                ObjectCommand::BindInstanceBuffer(buffer) => {
+                    dev.cmd_bind_vertex_buffers(cmd, 1, &[buffer], &[0])
+                }
+                ObjectCommand::BindMesh(vertex, index) => {
+                    dev.cmd_bind_vertex_buffers(cmd, 0, &[vertex], &[0]);
+                    dev.cmd_bind_index_buffer(cmd, index, 0, vk::IndexType::UINT16);
+                }
+                ObjectCommand::BindTexture(_) => {}
+                ObjectCommand::DrawIndexed {
+                    index_count,
+                    instance_count,
+                    first_instance,
+                } => {
+                    dev.cmd_draw_indexed(cmd, index_count, instance_count, 0, 0, first_instance);
+                    draws += 1;
+                }
+            },
+        );
+        dev.cmd_end_rendering(cmd);
+        dev.cmd_pipeline_barrier(
+            cmd,
+            depth_stages(),
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[shadow_sampling_barrier(shadow.image(frame))],
+        );
+    }
+    draws
+}
+
+fn shadow_attachment_barrier(
+    image: vk::Image,
+    used: bool,
+) -> (vk::PipelineStageFlags, vk::ImageMemoryBarrier<'static>) {
+    let (stage, access, layout) = if used {
+        (
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::AccessFlags::SHADER_READ,
+            vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+        )
+    } else {
+        (
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::AccessFlags::empty(),
+            vk::ImageLayout::UNDEFINED,
+        )
+    };
+    (
+        stage,
+        vk::ImageMemoryBarrier::default()
+            .src_access_mask(access)
+            .dst_access_mask(
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )
+            .old_layout(layout)
+            .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image)
+            .subresource_range(depth_subresource_range()),
+    )
+}
+
+fn shadow_sampling_barrier(image: vk::Image) -> vk::ImageMemoryBarrier<'static> {
+    vk::ImageMemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+        .old_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+        .new_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(image)
+        .subresource_range(depth_subresource_range())
 }
 
 /// Emit the per-frame instance-buffer bind, then one bind-mesh/bind-texture/draw-indexed sequence
@@ -678,6 +888,67 @@ impl Drop for FrameContext {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shadow_barriers_order_first_use_reuse_and_sampling() {
+        use super::*;
+        for used in [false, true] {
+            let (stage, barrier) = shadow_attachment_barrier(vk::Image::null(), used);
+            assert_eq!(
+                stage,
+                if used {
+                    vk::PipelineStageFlags::FRAGMENT_SHADER
+                } else {
+                    vk::PipelineStageFlags::TOP_OF_PIPE
+                }
+            );
+            assert_eq!(
+                barrier.src_access_mask,
+                if used {
+                    vk::AccessFlags::SHADER_READ
+                } else {
+                    vk::AccessFlags::empty()
+                }
+            );
+            assert_eq!(
+                barrier.old_layout,
+                if used {
+                    vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                } else {
+                    vk::ImageLayout::UNDEFINED
+                }
+            );
+            assert_eq!(
+                barrier.new_layout,
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+            );
+            assert_eq!(
+                barrier.dst_access_mask,
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+            );
+            assert_eq!(
+                barrier.subresource_range.aspect_mask,
+                vk::ImageAspectFlags::DEPTH
+            );
+            assert_eq!(barrier.subresource_range.level_count, 1);
+            assert_eq!(barrier.subresource_range.layer_count, 1);
+        }
+        let barrier = shadow_sampling_barrier(vk::Image::null());
+        assert_eq!(
+            barrier.src_access_mask,
+            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+        );
+        assert_eq!(barrier.dst_access_mask, vk::AccessFlags::SHADER_READ);
+        assert_eq!(
+            barrier.old_layout,
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        );
+        assert_eq!(
+            barrier.new_layout,
+            vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+        );
+    }
+
     use super::super::buffer::Buffer;
     use super::super::texture::SpecularMaterial;
     use super::*;

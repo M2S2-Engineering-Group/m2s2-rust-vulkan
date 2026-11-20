@@ -177,6 +177,7 @@ fn text_pipeline(
                 .input_rate(vk::VertexInputRate::VERTEX)],
             attributes: &attributes,
             depth_test: false,
+            depth_bias: false,
             cull_mode: vk::CullModeFlags::NONE,
             blend: true,
             push_ranges: &[],
