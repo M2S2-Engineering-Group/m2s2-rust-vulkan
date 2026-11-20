@@ -42,3 +42,7 @@ path = "examples/triangle.rs"
 [[example]]
 name = "window"
 path = "examples/window.rs"
+
+[[example]]
+name = "model"
+path = "examples/model.rs"
