@@ -272,6 +272,53 @@ mod tests {
         bytes
     }
 
+    /// Shared minimal triangle geometry (POSITION/NORMAL/TEXCOORD_0 + 3 u16 indices) used by
+    /// tests that only care about node/mesh-count/transform behavior, not geometry content.
+    /// Returns (bin bytes, the 4 accessors backing them, the 4 bufferViews backing those).
+    fn shared_triangle_geometry() -> (Vec<u8>, Value, Value) {
+        let mut bin = Vec::new();
+        for p in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for c in p {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        let normals_offset = bin.len();
+        for _ in 0..3 {
+            bin.extend_from_slice(&0.0f32.to_le_bytes());
+            bin.extend_from_slice(&0.0f32.to_le_bytes());
+            bin.extend_from_slice(&1.0f32.to_le_bytes());
+        }
+        let uvs_offset = bin.len();
+        for uv in [[0.0f32, 0.0], [1.0, 0.0], [0.0, 1.0]] {
+            for c in uv {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        let indices_offset = bin.len();
+        for i in [0u16, 1, 2] {
+            bin.extend_from_slice(&i.to_le_bytes());
+        }
+        let indices_len = bin.len() - indices_offset;
+
+        let accessors = json!([
+            {
+                "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]
+            },
+            { "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3" },
+            { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" },
+            { "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }
+        ]);
+        let buffer_views = json!([
+            { "buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962 },
+            { "buffer": 0, "byteOffset": normals_offset, "byteLength": 36, "target": 34962 },
+            { "buffer": 0, "byteOffset": uvs_offset, "byteLength": 24, "target": 34962 },
+            { "buffer": 0, "byteOffset": indices_offset, "byteLength": indices_len, "target": 34963 }
+        ]);
+
+        (bin, accessors, buffer_views)
+    }
+
     fn write_glb_to_tempfile(bytes: &[u8]) -> std::path::PathBuf {
         let unique = UNIQUE_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut path = std::env::temp_dir();
@@ -461,5 +508,81 @@ mod tests {
         assert_eq!(model.meshes.len(), 1);
         assert_eq!(model.meshes[0].texture, None);
         assert!(model.textures.is_empty());
+    }
+
+    #[test]
+    fn world_transform_composes_through_a_three_level_chain_with_meshes_at_every_level() {
+        // Node A (translate (1,0,0), mesh 0) -> child Node B (translate (0,2,0), mesh 1) ->
+        // child Node C (translate (0,0,3), mesh 2). All three meshes reuse the same shared
+        // geometry/accessors; only node structure and transforms are under test here.
+        let (bin, accessors, buffer_views) = shared_triangle_geometry();
+        let bin_len = bin.len();
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] } ],
+            "scene": 0,
+            "nodes": [
+                { "mesh": 0, "translation": [1.0, 0.0, 0.0], "children": [1] },
+                { "mesh": 1, "translation": [0.0, 2.0, 0.0], "children": [2] },
+                { "mesh": 2, "translation": [0.0, 0.0, 3.0] }
+            ],
+            "meshes": [
+                { "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3 } ] },
+                { "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3 } ] },
+                { "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3 } ] }
+            ],
+            "accessors": accessors,
+            "bufferViews": buffer_views,
+            "buffers": [ { "byteLength": bin_len } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let model = super::load_gltf(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(model.meshes.len(), 3); // meshes at every level of the chain count, not just leaves
+        let translation_of = |m: &super::LoadedMesh| {
+            (
+                m.world_transform.get(0, 3).unwrap(),
+                m.world_transform.get(1, 3).unwrap(),
+                m.world_transform.get(2, 3).unwrap(),
+            )
+        };
+        assert_eq!(translation_of(&model.meshes[0]), (1.0, 0.0, 0.0));
+        assert_eq!(translation_of(&model.meshes[1]), (1.0, 2.0, 0.0));
+        assert_eq!(translation_of(&model.meshes[2]), (1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn two_scenes_with_no_explicit_default_uses_the_first() {
+        let (bin, accessors, buffer_views) = shared_triangle_geometry();
+        let bin_len = bin.len();
+
+        let doc = json!({
+            "asset": { "version": "2.0" },
+            "scenes": [ { "nodes": [0] }, { "nodes": [1] } ],
+            "nodes": [
+                { "mesh": 0 },
+                { "mesh": 1 }
+            ],
+            "meshes": [
+                { "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3 } ] },
+                { "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }, "indices": 3 } ] }
+            ],
+            "accessors": accessors,
+            "bufferViews": buffer_views,
+            "buffers": [ { "byteLength": bin_len } ]
+        });
+
+        let glb = glb_fixture(doc, &bin);
+        let path = write_glb_to_tempfile(&glb);
+        let model = super::load_gltf(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        // No top-level "scene" index: falls back to the first scene (index 0), which contains
+        // node 0 (mesh 0) only — not node 1's scene.
+        assert_eq!(model.meshes.len(), 1);
     }
 }
