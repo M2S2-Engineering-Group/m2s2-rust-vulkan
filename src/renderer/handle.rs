@@ -23,7 +23,7 @@ pub(crate) fn next_owner_id() -> u64 {
 
 fn allocate_owner_id(counter: &AtomicU64) -> u64 {
     counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
             value.checked_add(1)
         })
         .expect("renderer owner identifiers exhausted")
